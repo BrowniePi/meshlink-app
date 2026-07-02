@@ -47,6 +47,20 @@ flutter run -d android
 Android 12+ prompts for Nearby Devices (BLUETOOTH_SCAN/CONNECT) permissions at
 first scan. Emulators generally have no usable BLE stack; use a real device.
 
+## BLE plugin
+
+`flutter_blue_plus 2.3.10` (tested via `flutter analyze`/`flutter test` only —
+**not yet exercised on physical devices**; simulators/emulators have no usable
+BLE stack, so the PoC screen in `lib/ble_poc/` still needs a real-device pass
+on both platforms). Known platform quirks to expect:
+
+- Android 12+: `BLUETOOTH_SCAN` is declared `neverForLocation`; the plugin
+  requests Nearby Devices permission at first scan.
+- Android ≤ 11: scanning requires Location permission (legacy manifest
+  entries included).
+- iOS: the system Bluetooth prompt appears on first CoreBluetooth use;
+  `NSBluetoothAlwaysUsageDescription` is set in Info.plist.
+
 ## Tests
 
 ```

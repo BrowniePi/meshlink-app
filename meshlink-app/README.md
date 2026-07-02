@@ -27,6 +27,12 @@ ios/          Background BLE modes + CoreBluetooth state restoration
 - Flutter 3.44.4 (stable) / Dart 3.12 — see `pubspec.yaml` for constraints.
 - `flutter pub get`
 
+> **If this checkout lives in an iCloud-synced folder** (e.g. Desktop with
+> Desktop & Documents sync on), iOS builds fail with codesign "detritus not
+> allowed" errors: the file provider tags build products with FinderInfo
+> xattrs. Point the build dir at a non-synced location:
+> `ln -s ~/Library/Caches/meshlink_app_build build`
+
 ### Run on iOS
 
 ```

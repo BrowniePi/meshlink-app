@@ -62,3 +62,8 @@ The `Transport` contract (`meshlink-core/transport/base.py`) is mirrored in
   the Dart pipeline performs real Ed25519 verification while the Python
   reference still stubs it (Python gets real crypto in Phase 4). The
   `verifySignatures` flag preserves stub semantics for parity testing.
+- **msg_id derivation:** the spec (§3) calls for BLAKE3[0:16]; the app uses
+  SHA-256[0:16] pending a vetted Dart BLAKE3 implementation (see the TODO in
+  `lib/core/message_factory.dart`). Harmless at Phase 1 — msg_id is only a
+  dedup key and nothing recomputes it — but must be reconciled before any
+  implementation starts verifying msg_ids.

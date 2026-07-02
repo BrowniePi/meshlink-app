@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 
 import 'ble_poc/ble_scan_poc_screen.dart';
+import 'transport/relay_service.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Android: keep the BLE relay alive across backgrounding (no-op on iOS).
+  RelayService.start();
   runApp(const MeshLinkApp());
 }
 

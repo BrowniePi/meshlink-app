@@ -25,5 +25,6 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+        KeystoreBridge(this).attach(flutterEngine.dartExecutor.binaryMessenger)
     }
 }

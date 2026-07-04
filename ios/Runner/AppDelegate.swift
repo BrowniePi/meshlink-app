@@ -15,5 +15,8 @@ import UIKit
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "MeshLinkBleManager") {
       BleManager.shared.attach(messenger: registrar.messenger())
     }
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "MeshLinkKeychainBridge") {
+      KeychainBridge.shared.attach(messenger: registrar.messenger())
+    }
   }
 }

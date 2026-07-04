@@ -41,11 +41,15 @@ int _wallClockSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 /// to replay Python-generated vectors unchanged.
 class RelayPipeline {
   RelayPipeline({int Function()? now, this.verifySignatures = true})
-      : _now = now ?? _wallClockSeconds;
+      : _now = now ?? _wallClockSeconds {
+    _dedup = DedupCache(clock: _now);
+    _rateLimiter = RateLimiter(clock: _now);
+  }
 
   final int Function() _now;
   final bool verifySignatures;
-  final DedupCache _dedup = DedupCache();
+  late final DedupCache _dedup;
+  late final RateLimiter _rateLimiter;
 
   Future<PipelineResult> process(Uint8List raw) async {
     // Step 1 — size (pre-parse, one comparison)
@@ -80,8 +84,8 @@ class RelayPipeline {
       return PipelineResult(Outcome.drop, dropReason: dedupReason);
     }
 
-    // Step 5 — rate limit (stub)
-    final rateReason = checkRateLimit(msg);
+    // Step 5 — rate limit (sliding window per ephem_id, before crypto)
+    final rateReason = _rateLimiter.check(msg);
     if (rateReason != null) {
       return PipelineResult(Outcome.drop, dropReason: rateReason);
     }

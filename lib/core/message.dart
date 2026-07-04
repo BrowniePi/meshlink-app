@@ -48,7 +48,24 @@ class Message {
   final int msgType; // uint8  — message type enum
   final int payloadLen; // uint16 — byte length of payload field
   final Uint8List payload; // variable, 0–321 bytes
-  final Uint8List signature; // 64 bytes — Ed25519 over raw[0 : 75 + payloadLen]
+  final Uint8List signature; // 64 bytes — Ed25519 over signedRegion(raw)
+}
+
+/// The bytes covered by the Ed25519 signature: every field except `ttl`
+/// (offset 68), `spray_L` (offset 69), and the signature itself —
+/// `raw[0:68] ‖ raw[70 : 75 + payloadLen]`.
+///
+/// Those two bytes are rewritten at every relay hop (ttl decremented,
+/// spray_L binary-split), so including them would invalidate the origin
+/// signature past the first hop. Deviation from the original wire spec,
+/// confirmed 2026-07-04 — see PHASE4_CHANGES.md §Signing. Single
+/// implementation used by both signing and verification, mirroring
+/// pipeline/message.py:signed_region().
+Uint8List signedRegion(Uint8List raw, int payloadLen) {
+  final out = Uint8List(headerSize - 2 + payloadLen);
+  out.setRange(0, 68, raw);
+  out.setRange(68, out.length, raw, 70);
+  return out;
 }
 
 /// Parse raw bytes into a [Message]. Throws [MalformedPacket] if structurally

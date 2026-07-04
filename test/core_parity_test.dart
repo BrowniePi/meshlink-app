@@ -24,11 +24,11 @@ void main() {
 
   // One pipeline for all vectors, in order — the duplicate_msg_id vector
   // relies on dedup state written by valid_text_deliver, exactly as in the
-  // Python generation run. Signature verification off: the Python reference
-  // stubs step 6, and these vectors carry zeroed signatures.
+  // Python generation run. Signature verification on: the fixture is
+  // regenerated from meshlink-core @ Phase 4 (real Ed25519 signing) — see
+  // docs/phase4-parity-reconciliation.md.
   final pipeline = RelayPipeline(
     now: () => vectors.first['fixed_now'] as int,
-    verifySignatures: false,
   );
 
   test('Dart pipeline matches Python reference on all vectors', () async {

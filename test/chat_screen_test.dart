@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:meshlink_app/core/message.dart';
 import 'package:meshlink_app/core/message_factory.dart';
 import 'package:meshlink_app/core/pipeline.dart';
 import 'package:meshlink_app/debug/debug_log.dart';
@@ -70,6 +71,9 @@ void main() {
     final result = await RelayPipeline().process(onWire);
     expect(result.outcome, Outcome.deliver);
     expect(utf8.decode(result.message!.payload), 'hello mesh');
+    // Sent to the broadcast zone so a node relays it to every other node and
+    // its local cell — both directions relay, not just away from zone owner.
+    expect(result.message!.zoneId, broadcastZone);
   });
 
   testWidgets('received packet passes the pipeline and appears in the list',

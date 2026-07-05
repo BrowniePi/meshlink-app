@@ -8,6 +8,7 @@ const int signatureSize = 64; // Ed25519 signature appended after payload
 const int minPacket = 131; // pre-parse size floor (catches truncated headers)
 const int maxPacket = 460; // 75 header + 321 payload + 64 sig
 const int maxPayload = 321;
+const int broadcastZone = 0xFFFF; // zone_id value meaning "all zones / mesh-wide"
 
 /// Thrown by [parsePacket] when a packet is structurally invalid.
 /// Mirrors the ValueError raised by the Python reference implementation;

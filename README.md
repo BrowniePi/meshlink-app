@@ -14,12 +14,12 @@ lib/
   ui/         Minimal chat UI
 android/      Foreground service scaffold for background BLE relay
 ios/          Background BLE modes + CoreBluetooth state restoration
-
-pipeline/     Python implementation of the relay pipeline (reference impl)
-sim/          Simulated network harness (multiple processes over local sockets)
-routing/      Spray-and-Wait routing logic
-tests/        Python test suite for pipeline/sim/routing
 ```
+
+The Python reference implementation (relay pipeline, sim harness, routing)
+lives in the standalone `meshlink-core` repo, not in this one — see
+`docs/phase4-parity-reconciliation.md` for how the two stay in sync via
+`test/fixtures/parity_vectors.json`.
 
 ## Setup
 

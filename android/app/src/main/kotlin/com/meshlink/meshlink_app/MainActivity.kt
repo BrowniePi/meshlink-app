@@ -6,6 +6,8 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
 
+    private var gattServer: MeshGattServer? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(
@@ -25,5 +27,21 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+        KeystoreBridge(this).attach(flutterEngine.dartExecutor.binaryMessenger)
+        gattServer = MeshGattServer(this).also {
+            it.attach(flutterEngine.dartExecutor.binaryMessenger)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        // super dispatches to flutter_blue_plus's own permission listeners;
+        // we additionally resume peripheral advertising once BLUETOOTH_ADVERTISE
+        // is granted.
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        gattServer?.onRequestPermissionsResult(requestCode)
     }
 }

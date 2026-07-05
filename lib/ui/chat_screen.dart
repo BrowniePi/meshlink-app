@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../core/message.dart';
 import '../core/message_factory.dart';
 import '../core/pipeline.dart';
 import '../debug/debug_log.dart' as dbg;
@@ -148,10 +149,17 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _sendMessage(String text, {bool fromInput = false}) async {
     if (text.isEmpty) return;
 
+    // Broadcast zone (0xFFFF): this is a "message nearby devices" chat with
+    // no per-recipient addressing, so every message is mesh-wide. A node
+    // routes broadcast traffic to all other nodes AND its local BLE cell, so
+    // both directions relay symmetrically — a fixed unicast zone only ever
+    // relayed away from the node that owned that zone, which made the demo
+    // one-way.
     final packet = await buildSignedPacket(
       identity: widget.identity,
       ephemId: _ephemId,
       payload: utf8.encode(text),
+      zoneId: broadcastZone,
     );
 
     // Outgoing traffic obeys the same pipeline as incoming: a message we

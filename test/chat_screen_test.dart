@@ -3,11 +3,15 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:meshlink_app/core/message.dart';
 import 'package:meshlink_app/core/message_factory.dart';
 import 'package:meshlink_app/core/pipeline.dart';
-import 'package:meshlink_app/core/test_identity.dart';
+import 'package:meshlink_app/debug/debug_log.dart';
+import 'package:meshlink_app/identity/device_identity.dart';
 import 'package:meshlink_app/transport/transport.dart';
 import 'package:meshlink_app/ui/chat_screen.dart';
+
+import 'helpers/test_identity.dart';
 
 /// In-memory transport double: records sends, lets tests inject received
 /// packets, and proves the UI works against the Transport contract alone.
@@ -37,10 +41,10 @@ class FakeTransport implements Transport {
 }
 
 void main() {
-  late TestIdentity identity;
+  late DeviceIdentity identity;
 
   setUpAll(() async {
-    identity = await TestIdentity.load();
+    identity = await testIdentity();
   });
 
   Widget app(FakeTransport transport) => MaterialApp(
@@ -67,6 +71,9 @@ void main() {
     final result = await RelayPipeline().process(onWire);
     expect(result.outcome, Outcome.deliver);
     expect(utf8.decode(result.message!.payload), 'hello mesh');
+    // Sent to the broadcast zone so a node relays it to every other node and
+    // its local cell — both directions relay, not just away from zone owner.
+    expect(result.message!.zoneId, broadcastZone);
   });
 
   testWidgets('received packet passes the pipeline and appears in the list',
@@ -102,6 +109,29 @@ void main() {
     expect(find.textContaining('invalid signature'), findsOneWidget);
   });
 
+  testWidgets(
+      'receiving a forged packet logs the rejection to DebugLog for the '
+      'BLE-log screen', (tester) async {
+    DebugLog.instance.clear();
+    final transport = FakeTransport();
+    await tester.pumpWidget(app(transport));
+
+    final packet = await buildSignedPacket(
+      identity: identity,
+      ephemId: Uint8List.fromList(List.filled(16, 7)),
+      payload: utf8.encode('forged'),
+    );
+    packet[80] ^= 0xff;
+    transport.receive('fake-peer', packet);
+    await tester.pumpAndSettle();
+
+    final logged = DebugLog.instance.entries
+        .where((e) => e.tag == 'pipeline' && e.message.contains('DROPPED'));
+    expect(logged, isNotEmpty,
+        reason: 'the receiving node must log its own rejection verdict');
+    expect(logged.single.message, contains('invalid signature'));
+  });
+
   testWidgets('empty input does nothing', (tester) async {
     final transport = FakeTransport();
     await tester.pumpWidget(app(transport));
@@ -110,5 +140,94 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(transport.sent, isEmpty);
+  });
+
+  testWidgets('test menu sends a normal message', (tester) async {
+    final transport = FakeTransport();
+    await tester.pumpWidget(app(transport));
+
+    await tester.tap(find.byIcon(Icons.science_outlined));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Send a normal message'));
+    await tester.pumpAndSettle();
+
+    expect(transport.sent, hasLength(1));
+    expect(find.text('Test message #1'), findsOneWidget);
+  });
+
+  testWidgets(
+      'forged-signature attack is transmitted raw — this device never '
+      'checks it locally', (tester) async {
+    final transport = FakeTransport();
+    await tester.pumpWidget(app(transport));
+
+    await tester.tap(find.byIcon(Icons.science_outlined));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Forged signature'));
+    await tester.pumpAndSettle();
+
+    // The whole point: the forged packet must actually reach the wire.
+    // If this device's own pipeline had filtered it, nothing would be sent.
+    expect(transport.sent, hasLength(1));
+    final onWire = transport.sent.single.$2;
+
+    // Only a receiving node's pipeline determines the outcome — simulate
+    // that node here and confirm it's the one rejecting the forgery.
+    final result = await RelayPipeline().process(onWire);
+    expect(result.outcome, Outcome.drop);
+    expect(result.dropReason, 'invalid signature');
+
+    expect(find.text('Attack: Forged signature'), findsOneWidget);
+    expect(find.textContaining('bypassing'), findsWidgets);
+  });
+
+  testWidgets('flood attack transmits all 11 packets raw to the peer',
+      (tester) async {
+    final transport = FakeTransport();
+    await tester.pumpWidget(app(transport));
+
+    await tester.tap(find.byIcon(Icons.science_outlined));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Flood (rate limit)'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Flood (rate limit)'));
+    await tester.pumpAndSettle();
+
+    // This device must not run its own rate limiter over the flood — all
+    // 11 packets go out; the target's limiter is what should trip.
+    expect(transport.sent, hasLength(11));
+  });
+
+  testWidgets('attack with no peers connected sends nothing and warns',
+      (tester) async {
+    final transport = FakeTransport()..peers = [];
+    await tester.pumpWidget(app(transport));
+
+    await tester.tap(find.byIcon(Icons.science_outlined));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Forged signature'));
+    await tester.pumpAndSettle();
+
+    expect(transport.sent, isEmpty);
+    expect(find.textContaining('No peers connected'), findsOneWidget);
+  });
+
+  testWidgets('long-pressing a message opens the packet info sheet',
+      (tester) async {
+    final transport = FakeTransport();
+    await tester.pumpWidget(app(transport));
+
+    await tester.enterText(find.byType(TextField), 'inspect me');
+    await tester.tap(find.byIcon(Icons.send));
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.text('inspect me'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Packet info'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Packet details'), findsOneWidget);
+    expect(find.text('sender_key'), findsOneWidget);
+    expect(find.text('signature'), findsOneWidget);
   });
 }

@@ -12,6 +12,11 @@
         android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="30" />
+    <!-- Phase 6 WiFi mesh: WifiNetworkSpecifier request (CHANGE_NETWORK_STATE)
+         plus reading the current SSID for the toggle's tradeoff warning. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <!-- Foreground service keeping the BLE relay alive while backgrounded.
          connectedDevice type is mandatory for this use case on API 34+. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

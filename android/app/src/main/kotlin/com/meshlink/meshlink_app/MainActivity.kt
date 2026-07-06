@@ -28,6 +28,7 @@ class MainActivity : FlutterActivity() {
             }
         }
         KeystoreBridge(this).attach(flutterEngine.dartExecutor.binaryMessenger)
+        WifiMeshManager(this).attach(flutterEngine.dartExecutor.binaryMessenger)
         gattServer = MeshGattServer(this).also {
             it.attach(flutterEngine.dartExecutor.binaryMessenger)
         }

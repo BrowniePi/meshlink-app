@@ -11,9 +11,12 @@ import '../core/pipeline.dart';
 import '../debug/debug_log.dart' as dbg;
 import '../identity/device_identity.dart';
 import '../identity/token_storage.dart';
+import '../onboarding/wifi_mesh_toggle.dart';
+import '../transport/failover_transport.dart';
 import '../transport/transport.dart';
 import 'ble_log_screen.dart';
 import 'packet_info_sheet.dart';
+import 'widgets/mesh_status_indicator.dart';
 
 /// Attacks the test menu can inject, each targeting a specific pipeline step.
 enum _Attack {
@@ -503,12 +506,38 @@ class _ChatScreenState extends State<ChatScreen> {
         .showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// Phase 6: WiFi mesh toggle + indicator, present only when running on
+  /// the BLE+WiFi failover transport (plain-transport tests are unaffected).
+  FailoverTransport? get _failover => widget.transport is FailoverTransport
+      ? widget.transport as FailoverTransport
+      : null;
+
+  Future<void> _toggleWifiMesh(FailoverTransport failover) async {
+    if (failover.wifiEnabled.value) {
+      // Off: clean disconnect back to BLE-only — no confirmation needed.
+      await failover.disableWifi();
+    } else {
+      await enableWifiMeshWithWarnings(context, failover);
+    }
+    if (mounted) setState(() {});
+  }
+
   @override
   Widget build(BuildContext context) {
+    final failover = _failover;
     return Scaffold(
       appBar: AppBar(
         title: const Text('MeshLink chat (Phase 1)'),
         actions: [
+          if (failover != null)
+            ValueListenableBuilder<bool>(
+              valueListenable: failover.wifiEnabled,
+              builder: (context, enabled, _) => IconButton(
+                icon: Icon(enabled ? Icons.wifi : Icons.wifi_off),
+                tooltip: enabled ? 'Leave mesh WiFi' : 'Join mesh WiFi',
+                onPressed: () => _toggleWifiMesh(failover),
+              ),
+            ),
           IconButton(
             icon: const Icon(Icons.science_outlined),
             tooltip: 'Test menu',
@@ -518,6 +547,8 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Column(
         children: [
+          if (failover != null)
+            MeshStatusIndicator(wifiEnabled: failover.wifiEnabled),
           if (_transportError != null)
             Container(
               width: double.infinity,

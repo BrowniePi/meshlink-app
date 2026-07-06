@@ -38,6 +38,7 @@ dependencies:
   cryptography: ^2.9.0
   flutter_launcher_icons: ^0.14.4
   blake3_dart: ^1.0.0
+  http: ^1.6.0
 
 dev_dependencies:
   flutter_test:

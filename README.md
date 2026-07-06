@@ -52,6 +52,23 @@ flutter run -d android
 Android 12+ prompts for Nearby Devices (BLUETOOTH_SCAN/CONNECT) permissions at
 first scan. Emulators generally have no usable BLE stack; use a real device.
 
+### Pointing at a backend (Phase 5)
+
+Onboarding needs to reach a running `meshlink-backend` to fetch an attestation
+token. `localhost`/`127.0.0.1` refers to the phone itself, not your dev
+machine, so on a physical device pass the backend's LAN IP explicitly:
+
+```
+flutter run \
+  --dart-define=MESHLINK_BACKEND_URL=http://192.168.1.14:8000 \
+  --dart-define=MESHLINK_EVENT_ID=meshlink-demo
+```
+
+The phone and the machine running the backend must be on the same network.
+`event_id` must match what the backend and node are configured for. See
+`lib/config/backend_config.dart` for defaults (Android emulator: `10.0.2.2`;
+iOS simulator: `localhost` works as-is).
+
 ## BLE plugin
 
 `flutter_blue_plus 2.3.10` (tested via `flutter analyze`/`flutter test` only —

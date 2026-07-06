@@ -209,6 +209,32 @@ void main() {
     expect(transport.sent, hasLength(11));
   });
 
+  testWidgets(
+      'unattested-sender attack uses a fresh identity, not the device\'s own',
+      (tester) async {
+    final transport = FakeTransport();
+    await tester.pumpWidget(app(transport));
+
+    await tester.tap(find.byIcon(Icons.science_outlined));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Unattested sender'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Unattested sender'));
+    await tester.pumpAndSettle();
+
+    expect(transport.sent, hasLength(1));
+    // Otherwise perfectly valid — passes every check this device's pipeline
+    // can enforce locally (attestation is a node-side, Phase 5 check this
+    // app's own pipeline still stubs).
+    final result = await RelayPipeline().process(transport.sent.single.$2);
+    expect(result.outcome, Outcome.deliver);
+    // The whole point: sender_key must NOT be this device's real identity,
+    // or the message would already be attested via the normal chat flow.
+    expect(result.message!.senderKey, isNot(equals(identity.publicKey)));
+
+    expect(find.text('Attack: Unattested sender'), findsOneWidget);
+  });
+
   testWidgets('attack with no peers connected sends nothing and warns',
       (tester) async {
     final transport = FakeTransport()..peers = [];

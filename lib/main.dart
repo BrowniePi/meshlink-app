@@ -76,7 +76,10 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
               transport: BleTransport(),
               pipeline: RelayPipeline(),
               identity: widget.identity,
-              attestationToken: _token!.token,
+              attestationToken: _token!,
+              // Token expired mid-session: drop back to onboarding, which
+              // fetches and (on the fresh ChatScreen) re-presents a new one.
+              onTokenExpired: () => setState(() => _token = null),
             ),
       routes: {
         // Throwaway plugin PoC, kept reachable for debugging BLE issues.

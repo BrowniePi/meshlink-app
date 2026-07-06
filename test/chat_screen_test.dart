@@ -8,6 +8,7 @@ import 'package:meshlink_app/core/message_factory.dart';
 import 'package:meshlink_app/core/pipeline.dart';
 import 'package:meshlink_app/debug/debug_log.dart';
 import 'package:meshlink_app/identity/device_identity.dart';
+import 'package:meshlink_app/identity/token_storage.dart';
 import 'package:meshlink_app/transport/transport.dart';
 import 'package:meshlink_app/ui/chat_screen.dart';
 
@@ -52,7 +53,11 @@ void main() {
           transport: transport,
           pipeline: RelayPipeline(),
           identity: identity,
-          attestationToken: 'test.jwt.token',
+          attestationToken: AttestationToken(
+            token: 'test.jwt.token',
+            expiresAt: DateTime.now().add(const Duration(hours: 1)),
+          ),
+          onTokenExpired: () {},
         ),
       );
 
@@ -82,6 +87,32 @@ void main() {
     // Sent to the broadcast zone so a node relays it to every other node and
     // its local cell — both directions relay, not just away from zone owner.
     expect(result.message!.zoneId, broadcastZone);
+  });
+
+  testWidgets('an expired token re-onboards instead of sending', (tester) async {
+    final transport = FakeTransport();
+    var expiredCalls = 0;
+    await tester.pumpWidget(MaterialApp(
+      home: ChatScreen(
+        transport: transport,
+        pipeline: RelayPipeline(),
+        identity: identity,
+        attestationToken: AttestationToken(
+          token: 'expired.jwt.token',
+          expiresAt: DateTime.now().subtract(const Duration(minutes: 1)),
+        ),
+        onTokenExpired: () => expiredCalls++,
+      ),
+    ));
+
+    await tester.enterText(find.byType(TextField), 'hello mesh');
+    await tester.tap(find.byIcon(Icons.send));
+    await tester.pumpAndSettle();
+
+    // Nothing on the wire — not the message, not a dead-token presentation —
+    // and the app was asked to fetch a fresh pass.
+    expect(transport.sent, isEmpty);
+    expect(expiredCalls, greaterThan(0));
   });
 
   testWidgets('received packet passes the pipeline and appears in the list',

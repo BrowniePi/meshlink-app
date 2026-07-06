@@ -9,6 +9,10 @@ import 'message.dart';
 /// Message type enum values from docs/message-format.md §4.
 const int msgTypeText = 0x01;
 
+/// Attestation-presentation message (Phase 5): payload is the organiser JWT
+/// (ASCII). Must stay identical across the Python core, node, and Dart app.
+const int msgTypeAttestation = 0x06;
+
 /// Derive the 16-byte content-addressable msg_id per docs/message-format.md
 /// §3: BLAKE3(sender_key ‖ timestamp_be4 ‖ msg_type_byte ‖ payload)[0:16].
 /// Must match the Python core byte-for-byte (blake3 package there,

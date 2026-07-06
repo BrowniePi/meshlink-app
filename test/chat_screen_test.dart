@@ -8,6 +8,7 @@ import 'package:meshlink_app/core/message_factory.dart';
 import 'package:meshlink_app/core/pipeline.dart';
 import 'package:meshlink_app/debug/debug_log.dart';
 import 'package:meshlink_app/identity/device_identity.dart';
+import 'package:meshlink_app/identity/token_storage.dart';
 import 'package:meshlink_app/transport/transport.dart';
 import 'package:meshlink_app/ui/chat_screen.dart';
 
@@ -52,6 +53,11 @@ void main() {
           transport: transport,
           pipeline: RelayPipeline(),
           identity: identity,
+          attestationToken: AttestationToken(
+            token: 'test.jwt.token',
+            expiresAt: DateTime.now().add(const Duration(hours: 1)),
+          ),
+          onTokenExpired: () {},
         ),
       );
 
@@ -65,15 +71,48 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('hello mesh'), findsOneWidget);
-    expect(transport.sent, hasLength(1));
-    // What went on the wire passes a fresh pipeline with signature checks on.
-    final onWire = transport.sent.single.$2;
+    // Two packets on the wire: the attestation token is presented to the peer
+    // first (Phase 5), then the chat message.
+    expect(transport.sent, hasLength(2));
+    final presented = await RelayPipeline().process(transport.sent.first.$2);
+    expect(presented.message!.msgType, msgTypeAttestation);
+    expect(utf8.decode(presented.message!.payload), 'test.jwt.token');
+
+    // The chat message passes a fresh pipeline with signature checks on.
+    final onWire = transport.sent.last.$2;
     final result = await RelayPipeline().process(onWire);
     expect(result.outcome, Outcome.deliver);
+    expect(result.message!.msgType, msgTypeText);
     expect(utf8.decode(result.message!.payload), 'hello mesh');
     // Sent to the broadcast zone so a node relays it to every other node and
     // its local cell — both directions relay, not just away from zone owner.
     expect(result.message!.zoneId, broadcastZone);
+  });
+
+  testWidgets('an expired token re-onboards instead of sending', (tester) async {
+    final transport = FakeTransport();
+    var expiredCalls = 0;
+    await tester.pumpWidget(MaterialApp(
+      home: ChatScreen(
+        transport: transport,
+        pipeline: RelayPipeline(),
+        identity: identity,
+        attestationToken: AttestationToken(
+          token: 'expired.jwt.token',
+          expiresAt: DateTime.now().subtract(const Duration(minutes: 1)),
+        ),
+        onTokenExpired: () => expiredCalls++,
+      ),
+    ));
+
+    await tester.enterText(find.byType(TextField), 'hello mesh');
+    await tester.tap(find.byIcon(Icons.send));
+    await tester.pumpAndSettle();
+
+    // Nothing on the wire — not the message, not a dead-token presentation —
+    // and the app was asked to fetch a fresh pass.
+    expect(transport.sent, isEmpty);
+    expect(expiredCalls, greaterThan(0));
   });
 
   testWidgets('received packet passes the pipeline and appears in the list',
@@ -151,7 +190,10 @@ void main() {
     await tester.tap(find.text('Send a normal message'));
     await tester.pumpAndSettle();
 
-    expect(transport.sent, hasLength(1));
+    // Attestation presentation first, then the chat message.
+    expect(transport.sent, hasLength(2));
+    final chat = await RelayPipeline().process(transport.sent.last.$2);
+    expect(chat.message!.msgType, msgTypeText);
     expect(find.text('Test message #1'), findsOneWidget);
   });
 
@@ -196,6 +238,32 @@ void main() {
     // This device must not run its own rate limiter over the flood — all
     // 11 packets go out; the target's limiter is what should trip.
     expect(transport.sent, hasLength(11));
+  });
+
+  testWidgets(
+      'unattested-sender attack uses a fresh identity, not the device\'s own',
+      (tester) async {
+    final transport = FakeTransport();
+    await tester.pumpWidget(app(transport));
+
+    await tester.tap(find.byIcon(Icons.science_outlined));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Unattested sender'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Unattested sender'));
+    await tester.pumpAndSettle();
+
+    expect(transport.sent, hasLength(1));
+    // Otherwise perfectly valid — passes every check this device's pipeline
+    // can enforce locally (attestation is a node-side, Phase 5 check this
+    // app's own pipeline still stubs).
+    final result = await RelayPipeline().process(transport.sent.single.$2);
+    expect(result.outcome, Outcome.deliver);
+    // The whole point: sender_key must NOT be this device's real identity,
+    // or the message would already be attested via the normal chat flow.
+    expect(result.message!.senderKey, isNot(equals(identity.publicKey)));
+
+    expect(find.text('Attack: Unattested sender'), findsOneWidget);
   });
 
   testWidgets('attack with no peers connected sends nothing and warns',

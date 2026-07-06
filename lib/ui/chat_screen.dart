@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
@@ -9,6 +10,7 @@ import '../core/message_factory.dart';
 import '../core/pipeline.dart';
 import '../debug/debug_log.dart' as dbg;
 import '../identity/device_identity.dart';
+import '../identity/token_storage.dart';
 import '../transport/transport.dart';
 import 'ble_log_screen.dart';
 import 'packet_info_sheet.dart';
@@ -20,7 +22,8 @@ enum _Attack {
   staleTimestamp('Stale timestamp', 'step 3 — timestamp'),
   futureTimestamp('Future timestamp', 'step 3 — timestamp'),
   flood('Flood (rate limit)', 'step 5 — rate limit'),
-  oversized('Oversized packet', 'step 1 — size');
+  oversized('Oversized packet', 'step 1 — size'),
+  unattestedSender('Unattested sender', 'step 7 — attestation');
 
   const _Attack(this.label, this.target);
   final String label;
@@ -65,11 +68,23 @@ class ChatScreen extends StatefulWidget {
     required this.transport,
     required this.pipeline,
     required this.identity,
+    required this.attestationToken,
+    required this.onTokenExpired,
   });
 
   final Transport transport;
   final RelayPipeline pipeline;
   final DeviceIdentity identity;
+
+  /// The organiser attestation token (Phase 5). Its JWT is presented to each
+  /// node before this device's messages so the node will relay them; see
+  /// [_presentToPeers]. Its expiry gates when we must re-fetch.
+  final AttestationToken attestationToken;
+
+  /// Called when the token has expired mid-session. The app routes back
+  /// through onboarding to fetch and present a fresh one — a node silently
+  /// drops messages presented with a dead token, so there's no other signal.
+  final VoidCallback onTokenExpired;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -93,6 +108,11 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Last packet we sent — the source for the replay attack.
   Uint8List? _lastSentPacket;
 
+  /// Peers we've already handed our attestation token to. A node won't relay
+  /// this device's messages until it has cached our token (Phase 5 §3), so we
+  /// present it to each peer before sending anything through them.
+  final Set<String> _presentedPeers = {};
+
   @override
   void initState() {
     super.initState();
@@ -105,6 +125,55 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  /// True if the token has expired. When it has, ask the app to re-onboard
+  /// (fetch + present a fresh token) and stop using the dead one — a node
+  /// silently drops anything presented with an expired token.
+  bool _handleExpiredToken() {
+    if (!widget.attestationToken.isExpiredAt(DateTime.now())) return false;
+    widget.onTokenExpired();
+    return true;
+  }
+
+  /// Send our attestation token to every connected peer we haven't presented
+  /// to yet. One signed message per call (msg_type ATTESTATION, payload = the
+  /// JWT); sends are sequential, so a peer that is also given a chat message
+  /// right after receives the token first — the order the node needs.
+  Future<void> _presentToPeers() async {
+    if (_handleExpiredToken()) return;
+    final unpresented = widget.transport
+        .listPeers()
+        .where((p) => !_presentedPeers.contains(p))
+        .toList();
+    if (unpresented.isEmpty) return;
+
+    final Uint8List packet;
+    try {
+      packet = await buildSignedPacket(
+        identity: widget.identity,
+        ephemId: _ephemId,
+        payload: utf8.encode(widget.attestationToken.token),
+        msgType: msgTypeAttestation,
+        zoneId: broadcastZone,
+      );
+    } catch (e) {
+      // Was silently swallowed before — a token too large for maxPayload
+      // (e.g. a verbose JWT) threw here and the peer was never told, so the
+      // node correctly (but confusingly) reports "no valid token" forever.
+      dbg.DebugLog.instance.log('attest', 'failed to build presentation: $e',
+          level: dbg.LogLevel.error);
+      return;
+    }
+    for (final peer in unpresented) {
+      try {
+        await widget.transport.send(peer, packet);
+        _presentedPeers.add(peer);
+        dbg.DebugLog.instance.log('attest', 'presented token to $peer');
+      } catch (_) {
+        // Peer dropped mid-send; it'll be re-presented when it reappears.
+      }
+    }
+  }
+
   @override
   void dispose() {
     widget.transport.stop();
@@ -113,6 +182,10 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _onPacket(String peerId, Uint8List data) async {
+    // Traffic from a peer means it's connected — present our token to any
+    // newly-seen peer (covers a node reconnecting after onboarding).
+    unawaited(_presentToPeers());
+
     final result = await widget.pipeline.process(data);
     // This is the check that matters for attack testing: it runs on
     // whichever device actually received the bytes, not the one that sent
@@ -148,6 +221,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _sendMessage(String text, {bool fromInput = false}) async {
     if (text.isEmpty) return;
+    // An expired pass means the node would drop this anyway — re-onboard first.
+    if (_handleExpiredToken()) {
+      _showError('Your event pass expired — getting a new one…');
+      return;
+    }
 
     // Broadcast zone (0xFFFF): this is a "message nearby devices" chat with
     // no per-recipient addressing, so every message is mesh-wide. A node
@@ -171,6 +249,10 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     _lastSentPacket = packet;
+
+    // Make sure every peer has our token before the chat message, so the node
+    // relays it rather than dropping it as unattested.
+    await _presentToPeers();
 
     final peers = widget.transport.listPeers();
     var failures = 0;
@@ -327,6 +409,23 @@ class _ChatScreenState extends State<ChatScreen> {
       case _Attack.oversized:
         // 600 bytes > 460-byte max: rejected pre-parse at the size check.
         packets = [Uint8List(600)..fillRange(0, 600, 0x41)];
+
+      case _Attack.unattestedSender:
+        // Every other attack reuses widget.identity — the real, already-
+        // attested device key — so it's caught at its own step regardless of
+        // attestation (step 7 runs last; steps 1/3/4/5/6 reject them first).
+        // This is the only attack that needs a genuinely different identity:
+        // a fresh keypair that never ran onboarding or presented a token, so
+        // an otherwise perfectly valid, honestly-signed message has nothing
+        // to fail *except* attestation.
+        final strangerIdentity = await DeviceIdentity.generate();
+        packets = [
+          await buildSignedPacket(
+            identity: strangerIdentity,
+            ephemId: Uint8List.fromList(List.filled(16, 0x99)),
+            payload: utf8.encode('never onboarded'),
+          ),
+        ];
     }
 
     final peers = widget.transport.listPeers();

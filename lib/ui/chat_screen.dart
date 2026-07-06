@@ -10,6 +10,7 @@ import '../core/message_factory.dart';
 import '../core/pipeline.dart';
 import '../debug/debug_log.dart' as dbg;
 import '../identity/device_identity.dart';
+import '../identity/token_storage.dart';
 import '../transport/transport.dart';
 import 'ble_log_screen.dart';
 import 'packet_info_sheet.dart';
@@ -68,15 +69,22 @@ class ChatScreen extends StatefulWidget {
     required this.pipeline,
     required this.identity,
     required this.attestationToken,
+    required this.onTokenExpired,
   });
 
   final Transport transport;
   final RelayPipeline pipeline;
   final DeviceIdentity identity;
 
-  /// Opaque organiser JWT (Phase 5). Presented to each node before this
-  /// device's messages so the node will relay them; see [_presentToPeers].
-  final String attestationToken;
+  /// The organiser attestation token (Phase 5). Its JWT is presented to each
+  /// node before this device's messages so the node will relay them; see
+  /// [_presentToPeers]. Its expiry gates when we must re-fetch.
+  final AttestationToken attestationToken;
+
+  /// Called when the token has expired mid-session. The app routes back
+  /// through onboarding to fetch and present a fresh one — a node silently
+  /// drops messages presented with a dead token, so there's no other signal.
+  final VoidCallback onTokenExpired;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -117,24 +125,44 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  /// True if the token has expired. When it has, ask the app to re-onboard
+  /// (fetch + present a fresh token) and stop using the dead one — a node
+  /// silently drops anything presented with an expired token.
+  bool _handleExpiredToken() {
+    if (!widget.attestationToken.isExpiredAt(DateTime.now())) return false;
+    widget.onTokenExpired();
+    return true;
+  }
+
   /// Send our attestation token to every connected peer we haven't presented
   /// to yet. One signed message per call (msg_type ATTESTATION, payload = the
   /// JWT); sends are sequential, so a peer that is also given a chat message
   /// right after receives the token first — the order the node needs.
   Future<void> _presentToPeers() async {
+    if (_handleExpiredToken()) return;
     final unpresented = widget.transport
         .listPeers()
         .where((p) => !_presentedPeers.contains(p))
         .toList();
     if (unpresented.isEmpty) return;
 
-    final packet = await buildSignedPacket(
-      identity: widget.identity,
-      ephemId: _ephemId,
-      payload: utf8.encode(widget.attestationToken),
-      msgType: msgTypeAttestation,
-      zoneId: broadcastZone,
-    );
+    final Uint8List packet;
+    try {
+      packet = await buildSignedPacket(
+        identity: widget.identity,
+        ephemId: _ephemId,
+        payload: utf8.encode(widget.attestationToken.token),
+        msgType: msgTypeAttestation,
+        zoneId: broadcastZone,
+      );
+    } catch (e) {
+      // Was silently swallowed before — a token too large for maxPayload
+      // (e.g. a verbose JWT) threw here and the peer was never told, so the
+      // node correctly (but confusingly) reports "no valid token" forever.
+      dbg.DebugLog.instance.log('attest', 'failed to build presentation: $e',
+          level: dbg.LogLevel.error);
+      return;
+    }
     for (final peer in unpresented) {
       try {
         await widget.transport.send(peer, packet);
@@ -193,6 +221,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _sendMessage(String text, {bool fromInput = false}) async {
     if (text.isEmpty) return;
+    // An expired pass means the node would drop this anyway — re-onboard first.
+    if (_handleExpiredToken()) {
+      _showError('Your event pass expired — getting a new one…');
+      return;
+    }
 
     // Broadcast zone (0xFFFF): this is a "message nearby devices" chat with
     // no per-recipient addressing, so every message is mesh-wide. A node

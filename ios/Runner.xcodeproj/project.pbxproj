@@ -18,6 +18,7 @@
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
 		B1EA4D4F51ED2DC560051B1F /* BleManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1EA4D4E51ED2DC560051B1E /* BleManager.swift */; };
 		B1EA4D5151ED2DC560051B21 /* KeychainBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1EA4D5051ED2DC560051B20 /* KeychainBridge.swift */; };
+		B1EA4D5351ED2DC560051B23 /* WifiMeshManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1EA4D5251ED2DC560051B22 /* WifiMeshManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -63,6 +64,8 @@
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B1EA4D4E51ED2DC560051B1E /* BleManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BleManager.swift; sourceTree = "<group>"; };
 		B1EA4D5051ED2DC560051B20 /* KeychainBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainBridge.swift; sourceTree = "<group>"; };
+		B1EA4D5251ED2DC560051B22 /* WifiMeshManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WifiMeshManager.swift; sourceTree = "<group>"; };
+		B1EA4D5451ED2DC560051B24 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -128,6 +131,8 @@
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				B1EA4D4E51ED2DC560051B1E /* BleManager.swift */,
 				B1EA4D5051ED2DC560051B20 /* KeychainBridge.swift */,
+				B1EA4D5251ED2DC560051B22 /* WifiMeshManager.swift */,
+				B1EA4D5451ED2DC560051B24 /* Runner.entitlements */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
@@ -290,6 +295,7 @@
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				B1EA4D4F51ED2DC560051B1F /* BleManager.swift in Sources */,
 				B1EA4D5151ED2DC560051B21 /* KeychainBridge.swift in Sources */,
+				B1EA4D5351ED2DC560051B23 /* WifiMeshManager.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
 			);
@@ -386,6 +392,7 @@
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
 				DEVELOPMENT_TEAM = 7BQN2237T2;
 				ENABLE_BITCODE = NO;
+				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
 				INFOPLIST_FILE = Runner/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Firefly Chat";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -567,6 +574,7 @@
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
 				DEVELOPMENT_TEAM = 7BQN2237T2;
 				ENABLE_BITCODE = NO;
+				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
 				INFOPLIST_FILE = Runner/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Firefly Chat";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -591,6 +599,7 @@
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
 				DEVELOPMENT_TEAM = 7BQN2237T2;
 				ENABLE_BITCODE = NO;
+				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
 				INFOPLIST_FILE = Runner/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Firefly Chat";
 				LD_RUNPATH_SEARCH_PATHS = (

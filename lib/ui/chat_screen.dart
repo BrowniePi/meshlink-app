@@ -21,7 +21,8 @@ enum _Attack {
   staleTimestamp('Stale timestamp', 'step 3 — timestamp'),
   futureTimestamp('Future timestamp', 'step 3 — timestamp'),
   flood('Flood (rate limit)', 'step 5 — rate limit'),
-  oversized('Oversized packet', 'step 1 — size');
+  oversized('Oversized packet', 'step 1 — size'),
+  unattestedSender('Unattested sender', 'step 7 — attestation');
 
   const _Attack(this.label, this.target);
   final String label;
@@ -375,6 +376,23 @@ class _ChatScreenState extends State<ChatScreen> {
       case _Attack.oversized:
         // 600 bytes > 460-byte max: rejected pre-parse at the size check.
         packets = [Uint8List(600)..fillRange(0, 600, 0x41)];
+
+      case _Attack.unattestedSender:
+        // Every other attack reuses widget.identity — the real, already-
+        // attested device key — so it's caught at its own step regardless of
+        // attestation (step 7 runs last; steps 1/3/4/5/6 reject them first).
+        // This is the only attack that needs a genuinely different identity:
+        // a fresh keypair that never ran onboarding or presented a token, so
+        // an otherwise perfectly valid, honestly-signed message has nothing
+        // to fail *except* attestation.
+        final strangerIdentity = await DeviceIdentity.generate();
+        packets = [
+          await buildSignedPacket(
+            identity: strangerIdentity,
+            ephemId: Uint8List.fromList(List.filled(16, 0x99)),
+            payload: utf8.encode('never onboarded'),
+          ),
+        ];
     }
 
     final peers = widget.transport.listPeers();

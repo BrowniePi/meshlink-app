@@ -110,6 +110,20 @@ i.e., every field in the packet except `signature` itself. The signing key is th
 | `0x03` | ACK | Delivery acknowledgement — suppresses remaining spray copies |
 | `0x04` | ACK_SUPPRESS | Forwarded ACK suppression signal (depth ≤ 2 from original ACK emitter) |
 | `0x05` | ANNOUNCEMENT | Venue-wide broadcast from organiser; always paired with `zone_id = 0xFFFF` |
+| `0x06` | ATTESTATION | Ticket-bound identity token presentation (Phase 5) |
+
+### ATTESTATION payload
+
+Raw ASCII bytes of the organiser-issued attestation token — a compact
+EdDSA (Ed25519) JWT, ~299 bytes, under the 321-byte payload cap. Claims:
+`sub` (device Ed25519 public key, 64 hex chars, equal to the sender's
+`sender_key`), `eid` (event id), `iat`, `exp`. The message is signed like any
+other, so the relay pipeline's steps 1–6 already prove the presenter holds the
+private key for `sender_key`; step 7 (attestation) verifies the token and
+caches `sender_key → exp` so this sender's subsequent messages relay. This
+message is swallowed by nodes (delivered nowhere) but relayed per spray rules
+so peers learn the attestation too. **The `0x06` value must stay identical
+across the Python core, node, and Dart app.**
 
 ### TEXT and ANNOUNCEMENT payload
 

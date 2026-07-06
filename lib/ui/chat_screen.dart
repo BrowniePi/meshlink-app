@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
@@ -65,11 +66,16 @@ class ChatScreen extends StatefulWidget {
     required this.transport,
     required this.pipeline,
     required this.identity,
+    required this.attestationToken,
   });
 
   final Transport transport;
   final RelayPipeline pipeline;
   final DeviceIdentity identity;
+
+  /// Opaque organiser JWT (Phase 5). Presented to each node before this
+  /// device's messages so the node will relay them; see [_presentToPeers].
+  final String attestationToken;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -93,6 +99,11 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Last packet we sent — the source for the replay attack.
   Uint8List? _lastSentPacket;
 
+  /// Peers we've already handed our attestation token to. A node won't relay
+  /// this device's messages until it has cached our token (Phase 5 §3), so we
+  /// present it to each peer before sending anything through them.
+  final Set<String> _presentedPeers = {};
+
   @override
   void initState() {
     super.initState();
@@ -105,6 +116,35 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  /// Send our attestation token to every connected peer we haven't presented
+  /// to yet. One signed message per call (msg_type ATTESTATION, payload = the
+  /// JWT); sends are sequential, so a peer that is also given a chat message
+  /// right after receives the token first — the order the node needs.
+  Future<void> _presentToPeers() async {
+    final unpresented = widget.transport
+        .listPeers()
+        .where((p) => !_presentedPeers.contains(p))
+        .toList();
+    if (unpresented.isEmpty) return;
+
+    final packet = await buildSignedPacket(
+      identity: widget.identity,
+      ephemId: _ephemId,
+      payload: utf8.encode(widget.attestationToken),
+      msgType: msgTypeAttestation,
+      zoneId: broadcastZone,
+    );
+    for (final peer in unpresented) {
+      try {
+        await widget.transport.send(peer, packet);
+        _presentedPeers.add(peer);
+        dbg.DebugLog.instance.log('attest', 'presented token to $peer');
+      } catch (_) {
+        // Peer dropped mid-send; it'll be re-presented when it reappears.
+      }
+    }
+  }
+
   @override
   void dispose() {
     widget.transport.stop();
@@ -113,6 +153,10 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _onPacket(String peerId, Uint8List data) async {
+    // Traffic from a peer means it's connected — present our token to any
+    // newly-seen peer (covers a node reconnecting after onboarding).
+    unawaited(_presentToPeers());
+
     final result = await widget.pipeline.process(data);
     // This is the check that matters for attack testing: it runs on
     // whichever device actually received the bytes, not the one that sent
@@ -171,6 +215,10 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     _lastSentPacket = packet;
+
+    // Make sure every peer has our token before the chat message, so the node
+    // relays it rather than dropping it as unattested.
+    await _presentToPeers();
 
     final peers = widget.transport.listPeers();
     var failures = 0;

@@ -52,6 +52,7 @@ void main() {
           transport: transport,
           pipeline: RelayPipeline(),
           identity: identity,
+          attestationToken: 'test.jwt.token',
         ),
       );
 
@@ -65,11 +66,18 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('hello mesh'), findsOneWidget);
-    expect(transport.sent, hasLength(1));
-    // What went on the wire passes a fresh pipeline with signature checks on.
-    final onWire = transport.sent.single.$2;
+    // Two packets on the wire: the attestation token is presented to the peer
+    // first (Phase 5), then the chat message.
+    expect(transport.sent, hasLength(2));
+    final presented = await RelayPipeline().process(transport.sent.first.$2);
+    expect(presented.message!.msgType, msgTypeAttestation);
+    expect(utf8.decode(presented.message!.payload), 'test.jwt.token');
+
+    // The chat message passes a fresh pipeline with signature checks on.
+    final onWire = transport.sent.last.$2;
     final result = await RelayPipeline().process(onWire);
     expect(result.outcome, Outcome.deliver);
+    expect(result.message!.msgType, msgTypeText);
     expect(utf8.decode(result.message!.payload), 'hello mesh');
     // Sent to the broadcast zone so a node relays it to every other node and
     // its local cell — both directions relay, not just away from zone owner.
@@ -151,7 +159,10 @@ void main() {
     await tester.tap(find.text('Send a normal message'));
     await tester.pumpAndSettle();
 
-    expect(transport.sent, hasLength(1));
+    // Attestation presentation first, then the chat message.
+    expect(transport.sent, hasLength(2));
+    final chat = await RelayPipeline().process(transport.sent.last.$2);
+    expect(chat.message!.msgType, msgTypeText);
     expect(find.text('Test message #1'), findsOneWidget);
   });
 

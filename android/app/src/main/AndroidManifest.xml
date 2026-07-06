@@ -20,7 +20,11 @@
     <application
         android:label="meshlink_app"
         android:name="${applicationName}"
-        android:icon="@mipmap/launcher_icon">
+        android:icon="@mipmap/launcher_icon"
+        android:usesCleartextTraffic="true">
+        <!-- usesCleartextTraffic: the Phase 5 attestation backend runs over
+             plain http:// for local dev/demo. Use https and drop this for a
+             production organiser backend. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"

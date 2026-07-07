@@ -51,6 +51,9 @@ class IosWifiJoin implements WifiJoin {
         'passphrase': passphrase,
       });
     } on PlatformException catch (e) {
+      dbg.DebugLog.instance.log(
+          'wifi', 'join "$ssid" failed: ${e.code} ${e.message}',
+          level: dbg.LogLevel.error);
       throw WifiJoinException(e.message ?? 'WiFi join failed (${e.code})');
     }
     dbg.DebugLog.instance.log('wifi', 'joined "$ssid"');

@@ -109,7 +109,7 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
       home: home,
       routes: {
         // Throwaway plugin PoC, kept reachable for debugging BLE issues.
-        '/ble-poc': (_) => const BleScanPocScreen(),
+        '/ble-poc': (_) => BleScanPocScreen(wifiTransport: _transport.wifi),
       },
     );
   }

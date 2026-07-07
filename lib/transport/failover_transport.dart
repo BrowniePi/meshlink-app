@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../debug/debug_log.dart' as dbg;
 import '../power/battery_tier_manager.dart';
+import '../telemetry/phone_ping_responder.dart';
 import 'ble_transport.dart';
 import 'transport.dart';
 import 'wifi_transport.dart';
@@ -24,10 +25,16 @@ import 'wifi_transport.dart';
 /// and stop the WiFi side. Disabling reverts to exactly the BLE-only
 /// behavior — same pipeline, same routing, no other side effects.
 class FailoverTransport implements Transport {
-  FailoverTransport({required this.ble, required this.wifi});
+  FailoverTransport({required this.ble, required this.wifi, this.phonePing});
 
   final Transport ble;
   final WifiTransport wifi;
+
+  /// Phase 7 telemetry: answers the node's `MLPP1` ping frames. Optional so
+  /// plain-transport tests are unaffected; when absent, telemetry frames are
+  /// still demuxed away from the pipeline (they aren't signed packets) and
+  /// dropped.
+  final PhonePingResponder? phonePing;
 
   /// True while Ticket-only tier has both radios down (see [applyTier]).
   bool _suspended = false;
@@ -68,8 +75,23 @@ class FailoverTransport implements Transport {
 
   @override
   void onReceive(ReceiveCallback callback) {
-    ble.onReceive(callback);
-    wifi.onReceive(callback);
+    // Demux rule (phone-ping spec §2): a reassembled frame starting with
+    // `MLPP1` is a telemetry control frame and must never reach the mesh
+    // pipeline. Answering via [send] routes by peer id, so the pong leaves
+    // on the same transport (BLE or WiFi) the ping arrived on.
+    void demuxed(String peerId, Uint8List data) {
+      if (isTelemetryFrame(data)) {
+        final responder = phonePing;
+        if (responder != null) {
+          unawaited(responder.handle(peerId, data, send));
+        }
+        return;
+      }
+      callback(peerId, data);
+    }
+
+    ble.onReceive(demuxed);
+    wifi.onReceive(demuxed);
   }
 
   @override

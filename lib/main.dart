@@ -13,6 +13,7 @@ import 'onboarding/attestation_flow.dart';
 import 'onboarding/onboarding_screen.dart';
 import 'onboarding/wifi_mesh_toggle.dart';
 import 'power/battery_tier_manager.dart';
+import 'telemetry/phone_ping_responder.dart';
 import 'transport/ble_transport.dart';
 import 'transport/failover_transport.dart';
 import 'transport/relay_service.dart';
@@ -67,6 +68,9 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
   final FailoverTransport _transport = FailoverTransport(
     ble: BleTransport(),
     wifi: WifiTransport(config: WifiConfig.fromEnvironment),
+    // Phase 7: answer the node's 2-minute telemetry pings (location +
+    // battery) on whichever transport they arrive on.
+    phonePing: PhonePingResponder(),
   );
 
   /// Phase 7 four-tier battery management: polls every 60 s and throttles

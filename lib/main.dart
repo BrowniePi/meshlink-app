@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'ble_poc/ble_scan_poc_screen.dart';
@@ -10,6 +12,7 @@ import 'identity/token_storage.dart';
 import 'onboarding/attestation_flow.dart';
 import 'onboarding/onboarding_screen.dart';
 import 'onboarding/wifi_mesh_toggle.dart';
+import 'power/battery_tier_manager.dart';
 import 'transport/ble_transport.dart';
 import 'transport/failover_transport.dart';
 import 'transport/relay_service.dart';
@@ -66,6 +69,10 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
     wifi: WifiTransport(config: WifiConfig.fromEnvironment),
   );
 
+  /// Phase 7 four-tier battery management: polls every 60 s and throttles
+  /// the radios through [FailoverTransport.applyTier] on each transition.
+  final BatteryTierManager _batteryTier = BatteryTierManager();
+
   /// Whether the WiFi opt-in step has been offered this launch. Offered only
   /// after a fresh attestation fetch (first launch / expiry) — a valid stored
   /// token skips straight to chat, where the AppBar toggle takes over.
@@ -75,6 +82,18 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
   void initState() {
     super.initState();
     _wifiOffered = widget.initialToken != null;
+    _batteryTier.tier.addListener(_onTierChanged);
+    _batteryTier.start();
+  }
+
+  void _onTierChanged() =>
+      unawaited(_transport.applyTier(_batteryTier.tier.value));
+
+  @override
+  void dispose() {
+    _batteryTier.tier.removeListener(_onTierChanged);
+    _batteryTier.stop();
+    super.dispose();
   }
 
   @override
@@ -98,6 +117,7 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
         pipeline: RelayPipeline(),
         identity: widget.identity,
         attestationToken: _token!,
+        batteryTier: _batteryTier,
         // Token expired mid-session: drop back to onboarding, which
         // fetches and (on the fresh ChatScreen) re-presents a new one.
         onTokenExpired: () => setState(() => _token = null),

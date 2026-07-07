@@ -18,6 +18,19 @@ const String rxCharUuid = '4d455348-4c49-4e4b-0002-000000000002';
 /// Peripheral notifies outbound packets here (we subscribe when acting as central).
 const String txCharUuid = '4d455348-4c49-4e4b-0003-000000000003';
 
+/// Battery-tier duty-cycle knob (Phase 7). The Technical Reference's per-tier
+/// radio duty cycles map onto what the app-level BLE stack actually controls:
+/// the central scan cadence and whether the peripheral (GATT server) is
+/// advertising at all. Implemented by [BleTransport]; the failover transport
+/// applies the active [BatteryTier]'s parameters through this interface.
+abstract interface class DutyCycleControl {
+  void setDutyCycle({
+    required Duration scanEvery,
+    required Duration scanTimeout,
+    required bool advertise,
+  });
+}
+
 /// Concrete BLE transport satisfying the Phase 0 `Transport` contract
 /// (mirror of meshlink-core/transport/base.py). Swapping the Phase 0
 /// socket transport for this class is the only change the relay pipeline
@@ -42,10 +55,16 @@ const String txCharUuid = '4d455348-4c49-4e4b-0003-000000000003';
 /// max 460-byte MeshLink packet needs at most two writes (spec §1). Each
 /// packet is prefixed with a 2-byte big-endian total length; the receiver
 /// buffers per peer until that many bytes have arrived.
-class BleTransport implements Transport {
+class BleTransport implements Transport, DutyCycleControl {
   BleTransport({this.scanInterval = const Duration(seconds: 20)});
 
-  final Duration scanInterval;
+  Duration scanInterval;
+  Duration scanTimeout = const Duration(seconds: 10);
+
+  /// Whether the peripheral role (GATT server + advertising) should be up.
+  /// Leaf tier turns it off — zero relay load — while the central role keeps
+  /// the node link alive for the phone's own messages.
+  bool _advertise = true;
 
   static const MethodChannel _peripheral =
       MethodChannel('meshlink/ble_peripheral');
@@ -92,6 +111,40 @@ class BleTransport implements Transport {
 
     // Peripheral role: publish GATT server + advertise (native side).
     _peripheral.setMethodCallHandler(_onPeripheralEvent);
+    if (_advertise) await _startPeripheral();
+
+    // Central role: scan for the MeshLink service and connect to peers.
+    _scanSub = FlutterBluePlus.scanResults.listen(_onScanResults);
+    await _startScan();
+    _scanTimer = Timer.periodic(scanInterval, (_) => _startScan());
+  }
+
+  /// Apply a battery tier's radio budget: re-arm the scan loop at the new
+  /// cadence and raise/drop the peripheral role. Safe to call any time; when
+  /// not running, the parameters just take effect on the next [start].
+  @override
+  void setDutyCycle({
+    required Duration scanEvery,
+    required Duration scanTimeout,
+    required bool advertise,
+  }) {
+    scanInterval = scanEvery;
+    this.scanTimeout = scanTimeout;
+    final advertiseChanged = advertise != _advertise;
+    _advertise = advertise;
+    if (!_running) return;
+    dbg.DebugLog.instance.log(
+        'transport',
+        'duty cycle: scan ${scanTimeout.inSeconds}s every '
+            '${scanEvery.inSeconds}s, advertising ${advertise ? 'on' : 'off'}');
+    _scanTimer?.cancel();
+    _scanTimer = Timer.periodic(scanInterval, (_) => _startScan());
+    if (advertiseChanged) {
+      unawaited(advertise ? _startPeripheral() : _stopPeripheral());
+    }
+  }
+
+  Future<void> _startPeripheral() async {
     try {
       await _peripheral.invokeMethod<void>('start');
       dbg.DebugLog.instance.log('peripheral', 'GATT server advertising started');
@@ -102,11 +155,15 @@ class BleTransport implements Transport {
           'peripheral', 'no native peripheral on this platform (central only)',
           level: dbg.LogLevel.warn);
     }
+  }
 
-    // Central role: scan for the MeshLink service and connect to peers.
-    _scanSub = FlutterBluePlus.scanResults.listen(_onScanResults);
-    await _startScan();
-    _scanTimer = Timer.periodic(scanInterval, (_) => _startScan());
+  Future<void> _stopPeripheral() async {
+    try {
+      await _peripheral.invokeMethod<void>('stop');
+      dbg.DebugLog.instance.log('peripheral', 'GATT server advertising stopped');
+    } on MissingPluginException {
+      // ignore: platform has no peripheral side
+    }
   }
 
   @override
@@ -117,11 +174,7 @@ class BleTransport implements Transport {
     await _scanSub?.cancel();
     _scanSub = null;
     await FlutterBluePlus.stopScan();
-    try {
-      await _peripheral.invokeMethod<void>('stop');
-    } on MissingPluginException {
-      // ignore: platform has no peripheral side
-    }
+    await _stopPeripheral();
     for (final sub in _notifySubs.values) {
       await sub.cancel();
     }
@@ -211,7 +264,7 @@ class BleTransport implements Transport {
     try {
       await FlutterBluePlus.startScan(
         withServices: [Guid(meshServiceUuid)],
-        timeout: const Duration(seconds: 10),
+        timeout: scanTimeout,
       );
       dbg.DebugLog.instance.log('scan', 'scanning for MeshLink service');
     } catch (_) {

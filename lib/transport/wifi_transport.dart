@@ -29,7 +29,7 @@ class WifiTransport implements Transport {
     this.reconnectDelay = const Duration(seconds: 3),
   }) : _join = join ?? WifiJoin.forPlatform();
 
-  final WifiConfig config;
+  WifiConfig config;
   final WifiJoin _join;
   final Duration reconnectDelay;
 
@@ -62,10 +62,34 @@ class WifiTransport implements Transport {
       _teardownSocket();
       _scheduleReconnect();
     });
-    await _join.join(config.ssid, config.passphrase);
+    try {
+      await _join.join(config.ssid, config.passphrase);
+    } catch (e) {
+      // Reset so a retried start() actually re-attempts the join, instead
+      // of no-op'ing on the stale _running flag from this failed attempt.
+      _running = false;
+      dbg.DebugLog.instance
+          .log('wifi', 'start failed: $e', level: dbg.LogLevel.error);
+      rethrow;
+    }
     // Joining the SSID is what start() guarantees; the node connection
     // establishes in the background (with retries) — BLE keeps relaying
     // until it's up, per the fallback design rule.
+    unawaited(_connect());
+  }
+
+  /// Debug Pi/Mac switch: retarget the node connection to [newConfig]. The
+  /// SSID is unchanged, so this only drops the current TCP socket and
+  /// reconnects to the new host — no WiFi re-join. A no-op reconnect if not
+  /// running (the new host is simply used by the next start()).
+  void retargetNode(WifiConfig newConfig) {
+    config = newConfig;
+    dbg.DebugLog.instance
+        .log('wifi', 'retargeting node → ${newConfig.nodeHost}');
+    if (!_running) return;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _teardownSocket();
     unawaited(_connect());
   }
 
@@ -105,6 +129,8 @@ class WifiTransport implements Transport {
 
   Future<void> _connect() async {
     if (!_running || _socket != null) return;
+    dbg.DebugLog.instance
+        .log('wifi', 'connecting to node ${config.nodeHost}:${config.nodePort}');
     try {
       final socket = await Socket.connect(
         config.nodeHost,
@@ -125,9 +151,11 @@ class WifiTransport implements Transport {
         onError: (_) => _onSocketClosed(),
       );
       dbg.DebugLog.instance.log('wifi', 'connected to node $_peerId');
-    } catch (_) {
+    } catch (e) {
       dbg.DebugLog.instance.log(
-          'wifi', 'node connect failed, retrying in ${reconnectDelay.inSeconds}s',
+          'wifi',
+          'node connect to ${config.nodeHost}:${config.nodePort} failed: $e '
+              '(retrying in ${reconnectDelay.inSeconds}s)',
           level: dbg.LogLevel.warn);
       _scheduleReconnect();
     }

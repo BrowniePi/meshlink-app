@@ -14,11 +14,19 @@ class FakeWifiJoin implements WifiJoin {
   void Function()? lostCallback;
   WifiState state = const WifiState();
 
+  /// Set to make the next join() throw, simulating an OS-level refusal.
+  Object? failNextJoin;
+
   @override
   Future<WifiState> currentState() async => state;
 
   @override
   Future<void> join(String ssid, String passphrase) async {
+    if (failNextJoin != null) {
+      final error = failNextJoin!;
+      failNextJoin = null;
+      throw error;
+    }
     joinedSsid = ssid;
     joinedPassphrase = passphrase;
   }
@@ -187,5 +195,42 @@ void main() {
       () => transport.send('wifi:10.0.0.9:1', Uint8List(1)),
       throwsStateError,
     );
+  });
+
+  test('a failed join can be retried by a later start()', () async {
+    join.failNextJoin = WifiJoinException('refused');
+    await expectLater(transport.start(), throwsA(isA<WifiJoinException>()));
+    expect(transport.connected, isFalse);
+
+    // Retry should actually re-attempt the join, not silently no-op.
+    await transport.start();
+    await _pump();
+    expect(join.joinedSsid, 'MeshLink-Test');
+    expect(transport.connected, isTrue);
+  });
+
+  test('retargetNode reconnects to the new host without a WiFi re-join',
+      () async {
+    await transport.start();
+    await _pump();
+    expect(transport.connected, isTrue);
+
+    // A second stand-in node on a different port = the "other" node type.
+    final other = await FakeNode.start();
+    addTearDown(other.close);
+    join.joinedSsid = null; // prove no re-join happens on retarget
+
+    transport.retargetNode(WifiConfig(
+      ssid: 'MeshLink-Test',
+      passphrase: 'test-passphrase',
+      nodeHost: '127.0.0.1',
+      nodePort: other.port,
+    ));
+    await _pump();
+
+    expect(transport.connected, isTrue);
+    expect(transport.listPeers(), ['wifi:127.0.0.1:${other.port}']);
+    expect(other.sockets, hasLength(1)); // connected to the new node
+    expect(join.joinedSsid, isNull); // SSID unchanged → no re-join
   });
 }

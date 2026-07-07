@@ -14,6 +14,7 @@ import '../identity/token_storage.dart';
 import '../onboarding/wifi_mesh_toggle.dart';
 import '../transport/failover_transport.dart';
 import '../transport/transport.dart';
+import '../ble_poc/ble_scan_poc_screen.dart';
 import 'ble_log_screen.dart';
 import 'packet_info_sheet.dart';
 import 'widgets/mesh_status_indicator.dart';
@@ -322,6 +323,19 @@ class _ChatScreenState extends State<ChatScreen> {
                   ));
                 },
               ),
+              if (_failover != null)
+                ListTile(
+                  leading: const Icon(Icons.developer_board),
+                  title: const Text('WiFi node type'),
+                  subtitle: const Text('Switch bench target between Pi / Mac'),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    Navigator.of(context).push(MaterialPageRoute(
+                      builder: (_) =>
+                          BleScanPocScreen(wifiTransport: _failover!.wifi),
+                    ));
+                  },
+                ),
               const Divider(),
               const Padding(
                 padding: EdgeInsets.fromLTRB(16, 4, 16, 4),

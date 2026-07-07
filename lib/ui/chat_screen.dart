@@ -12,11 +12,13 @@ import '../debug/debug_log.dart' as dbg;
 import '../identity/device_identity.dart';
 import '../identity/token_storage.dart';
 import '../onboarding/wifi_mesh_toggle.dart';
+import '../power/battery_tier_manager.dart';
 import '../transport/failover_transport.dart';
 import '../transport/transport.dart';
 import '../ble_poc/ble_scan_poc_screen.dart';
 import 'ble_log_screen.dart';
 import 'packet_info_sheet.dart';
+import 'widgets/battery_tier_indicator.dart';
 import 'widgets/mesh_status_indicator.dart';
 
 /// Attacks the test menu can inject, each targeting a specific pipeline step.
@@ -74,11 +76,17 @@ class ChatScreen extends StatefulWidget {
     required this.identity,
     required this.attestationToken,
     required this.onTokenExpired,
+    this.batteryTier,
   });
 
   final Transport transport;
   final RelayPipeline pipeline;
   final DeviceIdentity identity;
+
+  /// Phase 7 battery tiers: drives the mode strip, the test menu's force
+  /// options, and the Ticket-only messaging cut-off. Optional so transport-
+  /// contract tests can run the screen without the battery plugin.
+  final BatteryTierManager? batteryTier;
 
   /// The organiser attestation token (Phase 5). Its JWT is presented to each
   /// node before this device's messages so the node will relay them; see
@@ -225,6 +233,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _sendMessage(String text, {bool fromInput = false}) async {
     if (text.isEmpty) return;
+    // Ticket-only tier: radios are down and all messaging is disabled — only
+    // the (cached) ticket QR keeps working per the battery table.
+    if (widget.batteryTier?.tier.value == BatteryTier.ticketOnly) {
+      _showError('Battery critical — messaging disabled (Ticket-only mode)');
+      return;
+    }
     // An expired pass means the node would drop this anyway — re-onboard first.
     if (_handleExpiredToken()) {
       _showError('Your event pass expired — getting a new one…');
@@ -336,6 +350,36 @@ class _ChatScreenState extends State<ChatScreen> {
                     ));
                   },
                 ),
+              if (widget.batteryTier != null) ...[
+                const Divider(),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 4, 16, 4),
+                  child: Text('Force battery tier',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.battery_saver),
+                  title: const Text('Auto (from battery level)'),
+                  subtitle: Text(widget.batteryTier!.level.value == null
+                      ? 'Battery level unknown'
+                      : 'Battery at ${widget.batteryTier!.level.value}%'),
+                  selected: widget.batteryTier!.forced == null,
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    widget.batteryTier!.force(null);
+                  },
+                ),
+                for (final tier in BatteryTier.values)
+                  ListTile(
+                    leading: const Icon(Icons.battery_std),
+                    title: Text(tier.label),
+                    selected: widget.batteryTier!.forced == tier,
+                    onTap: () {
+                      Navigator.pop(sheetContext);
+                      widget.batteryTier!.force(tier);
+                    },
+                  ),
+              ],
               const Divider(),
               const Padding(
                 padding: EdgeInsets.fromLTRB(16, 4, 16, 4),
@@ -561,6 +605,8 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Column(
         children: [
+          if (widget.batteryTier != null)
+            BatteryTierIndicator(manager: widget.batteryTier!),
           if (failover != null)
             MeshStatusIndicator(wifiEnabled: failover.wifiEnabled),
           if (_transportError != null)

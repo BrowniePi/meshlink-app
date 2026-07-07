@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../debug/debug_log.dart' as dbg;
+import '../power/battery_tier_manager.dart';
+import 'ble_transport.dart';
 import 'transport.dart';
 import 'wifi_transport.dart';
 
@@ -25,6 +29,9 @@ class FailoverTransport implements Transport {
   final Transport ble;
   final WifiTransport wifi;
 
+  /// True while Ticket-only tier has both radios down (see [applyTier]).
+  bool _suspended = false;
+
   /// Whether the WiFi mesh side is enabled (the onboarding/chat toggle).
   /// UI-observable so the "No Internet (by design)" indicator can follow it.
   final ValueNotifier<bool> wifiEnabled = ValueNotifier(false);
@@ -40,6 +47,9 @@ class FailoverTransport implements Transport {
 
   Future<void> enableWifi() async {
     if (wifiEnabled.value) return;
+    // Ticket-only tier: all messaging is disabled, so the toggle can't
+    // bring a radio back up. Cleared automatically when battery recovers.
+    if (_suspended) return;
     await wifi.start(); // throws WifiJoinException if the join fails
     wifiEnabled.value = true;
     dbg.DebugLog.instance.log('wifi', 'WiFi mesh enabled (preferred transport)');
@@ -66,5 +76,56 @@ class FailoverTransport implements Transport {
   List<String> listPeers() {
     if (wifiEnabled.value && wifi.connected) return wifi.listPeers();
     return ble.listPeers();
+  }
+
+  /// Enforce a battery tier (Technical Reference §6) on the radios.
+  ///
+  /// The table's BLE duty cycles map onto the knobs this stack has:
+  ///  - Active relay (100 ms/900 ms) — full scan cadence, advertising on.
+  ///  - Passive relay (50 ms/1,950 ms) — scan time quartered per period,
+  ///    advertising on. (Spray-copy suppression belongs to relay_forward,
+  ///    which the app pipeline stubs — step 8 always delivers today.)
+  ///  - Leaf — no P2P relay: advertising/GATT server off, sparse scanning
+  ///    only to keep finding the node for the phone's own messages.
+  ///  - Ticket-only — everything off. WiFi's user toggle is remembered so
+  ///    a recharge restores exactly the setup the user chose.
+  Future<void> applyTier(BatteryTier tier) async {
+    dbg.DebugLog.instance.log('battery', 'applying ${tier.label} to radios');
+    if (tier == BatteryTier.ticketOnly) {
+      if (_suspended) return;
+      _suspended = true;
+      await ble.stop();
+      if (wifiEnabled.value) await wifi.stop(); // toggle state preserved
+      return;
+    }
+    if (_suspended) {
+      _suspended = false;
+      await ble.start();
+      if (wifiEnabled.value) await wifi.start();
+    }
+    if (ble is! DutyCycleControl) return; // test doubles
+    final bleControl = ble as DutyCycleControl;
+    switch (tier) {
+      case BatteryTier.activeRelay:
+        bleControl.setDutyCycle(
+          scanEvery: const Duration(seconds: 20),
+          scanTimeout: const Duration(seconds: 10),
+          advertise: true,
+        );
+      case BatteryTier.passiveRelay:
+        bleControl.setDutyCycle(
+          scanEvery: const Duration(seconds: 60),
+          scanTimeout: const Duration(seconds: 8),
+          advertise: true,
+        );
+      case BatteryTier.leaf:
+        bleControl.setDutyCycle(
+          scanEvery: const Duration(seconds: 120),
+          scanTimeout: const Duration(seconds: 5),
+          advertise: false,
+        );
+      case BatteryTier.ticketOnly:
+        break; // handled above
+    }
   }
 }

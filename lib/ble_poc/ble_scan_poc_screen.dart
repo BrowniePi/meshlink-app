@@ -9,8 +9,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
+import '../config/wifi_config.dart';
+import '../transport/wifi_transport.dart';
+
 class BleScanPocScreen extends StatefulWidget {
-  const BleScanPocScreen({super.key});
+  const BleScanPocScreen({super.key, this.wifiTransport});
+
+  /// Present when reached from the running app (not the standalone route),
+  /// letting the Pi/Mac switch below actually affect the live WiFi transport.
+  final WifiTransport? wifiTransport;
 
   @override
   State<BleScanPocScreen> createState() => _BleScanPocScreenState();
@@ -21,6 +28,7 @@ class _BleScanPocScreenState extends State<BleScanPocScreen> {
   List<ScanResult> _results = [];
   bool _scanning = false;
   String? _error;
+  late WifiNodeType _nodeType;
 
   late final StreamSubscription<BluetoothAdapterState> _adapterSub;
   late final StreamSubscription<List<ScanResult>> _resultsSub;
@@ -29,6 +37,8 @@ class _BleScanPocScreenState extends State<BleScanPocScreen> {
   @override
   void initState() {
     super.initState();
+    // Reflect whatever the live transport is currently targeting.
+    _nodeType = widget.wifiTransport?.config.nodeType ?? WifiNodeType.pi;
     _adapterSub = FlutterBluePlus.adapterState.listen((state) {
       setState(() => _adapterState = state);
     });
@@ -65,6 +75,17 @@ class _BleScanPocScreenState extends State<BleScanPocScreen> {
     }
   }
 
+  void _setNodeType(WifiNodeType type) {
+    setState(() => _nodeType = type);
+    final transport = widget.wifiTransport;
+    if (transport == null) return;
+    final config = transport.config.forNodeType(type);
+    transport.retargetNode(config);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('Targeting ${type.name} node (${config.nodeHost})'),
+    ));
+  }
+
   @override
   Widget build(BuildContext context) {
     final bluetoothOn = _adapterState == BluetoothAdapterState.on;
@@ -72,6 +93,20 @@ class _BleScanPocScreenState extends State<BleScanPocScreen> {
       appBar: AppBar(title: const Text('BLE PoC (throwaway)')),
       body: Column(
         children: [
+          if (widget.wifiTransport != null)
+            Padding(
+              padding: const EdgeInsets.all(8),
+              child: SegmentedButton<WifiNodeType>(
+                segments: const [
+                  ButtonSegment(value: WifiNodeType.pi, label: Text('Pi node')),
+                  ButtonSegment(
+                      value: WifiNodeType.mac, label: Text('Mac node')),
+                ],
+                selected: {_nodeType},
+                onSelectionChanged: (selection) =>
+                    _setNodeType(selection.first),
+              ),
+            ),
           if (!bluetoothOn)
             MaterialBanner(
               content: Text('Bluetooth is ${_adapterState.name} — turn it on to scan.'),

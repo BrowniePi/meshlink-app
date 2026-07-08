@@ -1,0 +1,35 @@
+{
+  "generator": "tool/gen_friendship_vectors.py @ meshlink-core Friendship",
+  "note": "seeds are throwaway fixture data, not real key material",
+  "token": {
+    "issuer_ed25519_seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "issuer_ed25519_pub_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+    "grantee_ed25519_pub_hex": "29acbae141bccaf0b22e1a94d34d0bc7361e526d0bfe12c89794bc9322966dd7",
+    "issued_at": 1751400000,
+    "expiry_s": 86400,
+    "nonce_hex": "0011223344556677",
+    "token_hex": "0198ba85304ac639f039833a149ece561168643e4068658fc00100112233445566773299d7da302bd935079c4914d755835b28e620cdb78dd3ddf830519cccc5af037fb5d13badfaf6fe37d65ee64ff85543fce63b26a7a55e0924d08a33e0a0c60a"
+  },
+  "sealed": {
+    "recipient_x25519_seed_hex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "plaintext_hex": "70617269747920636865636b3a207365616c656420656e76656c6f7065",
+    "sealed_hex": "2caa2d12d19205c67c66d0c43d520736258d4cd326ca4547f4fd3f019cb29b32eaf662844b0dada8f3442bb54b529e186bc9d2ee9cac1904cd74b6a126fc781c6b9c85ab7c46608f17d20e052a"
+  },
+  "friend_request": {
+    "recipient_x25519_seed_hex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "username": "ada-l",
+    "sender_curve25519_pub_hex": "675dd574ed7789310b3d2e7681f3790b466c773b1521fecf36577958371ea52f",
+    "sender_ed25519_pub_hex": "29acbae141bccaf0b22e1a94d34d0bc7361e526d0bfe12c89794bc9322966dd7",
+    "hint_hex": "a1a2a3a4a5a6a7a8",
+    "payload_hex": "a1a2a3a4a5a6a7a8f4f89127c9d38d8ebef71ac634818ab4d4898275b28a16651c284e8859c10f62be0093fe1236b4af2b57d5eab4754b3791a453adb99c740843df35848da938ad7fe02256ebb853b0bf26ddbb3f7c284883817620621b00d6f983d8afcdb6779862b227086a449640a4854f0946139ff152eff8b04658"
+  },
+  "location_response": {
+    "requester_x25519_seed_hex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "lat_microdeg": 37774900,
+    "lon_microdeg": -122419400,
+    "accuracy_m": 12,
+    "beacon_age_s": 40,
+    "zone_id": 65535,
+    "payload_hex": "a1a2a3a4a5a6a7a8df58657062d8f49d6b1c61b7c1d018841479eb65f7e3e604238d940e76ced25d43ac42647a35a7d608178a8fbd8594494da8efce44d1b90d11deba78e7eefb74"
+  }
+}

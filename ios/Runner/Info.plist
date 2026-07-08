@@ -36,6 +36,8 @@
 	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>MeshLink relays messages between nearby devices over Bluetooth when there is no internet connection.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Your approximate position powers the organiser's live crowd map so staff can find and help people. Declining never affects messaging.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

@@ -57,7 +57,11 @@ first scan. Emulators generally have no usable BLE stack; use a real device.
 Onboarding needs to reach a running `meshlink-backend` to fetch an attestation
 token. `localhost`/`127.0.0.1` refers to the phone itself, not your dev
 machine, so on a physical device pass the backend's LAN IP explicitly:
-
+To get IP use
+```
+ipconfig getifaddr en0 || ipconfig getifaddr en1
+```
+And to run use
 ```
 flutter run \
   --dart-define=MESHLINK_BACKEND_URL=http://192.168.1.14:8000 \

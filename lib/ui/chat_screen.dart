@@ -11,9 +11,15 @@ import '../core/pipeline.dart';
 import '../debug/debug_log.dart' as dbg;
 import '../identity/device_identity.dart';
 import '../identity/token_storage.dart';
+import '../onboarding/wifi_mesh_toggle.dart';
+import '../power/battery_tier_manager.dart';
+import '../transport/failover_transport.dart';
 import '../transport/transport.dart';
+import '../ble_poc/ble_scan_poc_screen.dart';
 import 'ble_log_screen.dart';
 import 'packet_info_sheet.dart';
+import 'widgets/battery_tier_indicator.dart';
+import 'widgets/mesh_status_indicator.dart';
 
 /// Attacks the test menu can inject, each targeting a specific pipeline step.
 enum _Attack {
@@ -70,11 +76,17 @@ class ChatScreen extends StatefulWidget {
     required this.identity,
     required this.attestationToken,
     required this.onTokenExpired,
+    this.batteryTier,
   });
 
   final Transport transport;
   final RelayPipeline pipeline;
   final DeviceIdentity identity;
+
+  /// Phase 7 battery tiers: drives the mode strip, the test menu's force
+  /// options, and the Ticket-only messaging cut-off. Optional so transport-
+  /// contract tests can run the screen without the battery plugin.
+  final BatteryTierManager? batteryTier;
 
   /// The organiser attestation token (Phase 5). Its JWT is presented to each
   /// node before this device's messages so the node will relay them; see
@@ -221,6 +233,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _sendMessage(String text, {bool fromInput = false}) async {
     if (text.isEmpty) return;
+    // Ticket-only tier: radios are down and all messaging is disabled — only
+    // the (cached) ticket QR keeps working per the battery table.
+    if (widget.batteryTier?.tier.value == BatteryTier.ticketOnly) {
+      _showError('Battery critical — messaging disabled (Ticket-only mode)');
+      return;
+    }
     // An expired pass means the node would drop this anyway — re-onboard first.
     if (_handleExpiredToken()) {
       _showError('Your event pass expired — getting a new one…');
@@ -319,6 +337,49 @@ class _ChatScreenState extends State<ChatScreen> {
                   ));
                 },
               ),
+              if (_failover != null)
+                ListTile(
+                  leading: const Icon(Icons.developer_board),
+                  title: const Text('WiFi node type'),
+                  subtitle: const Text('Switch bench target between Pi / Mac'),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    Navigator.of(context).push(MaterialPageRoute(
+                      builder: (_) =>
+                          BleScanPocScreen(wifiTransport: _failover!.wifi),
+                    ));
+                  },
+                ),
+              if (widget.batteryTier != null) ...[
+                const Divider(),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 4, 16, 4),
+                  child: Text('Force battery tier',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.battery_saver),
+                  title: const Text('Auto (from battery level)'),
+                  subtitle: Text(widget.batteryTier!.level.value == null
+                      ? 'Battery level unknown'
+                      : 'Battery at ${widget.batteryTier!.level.value}%'),
+                  selected: widget.batteryTier!.forced == null,
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    widget.batteryTier!.force(null);
+                  },
+                ),
+                for (final tier in BatteryTier.values)
+                  ListTile(
+                    leading: const Icon(Icons.battery_std),
+                    title: Text(tier.label),
+                    selected: widget.batteryTier!.forced == tier,
+                    onTap: () {
+                      Navigator.pop(sheetContext);
+                      widget.batteryTier!.force(tier);
+                    },
+                  ),
+              ],
               const Divider(),
               const Padding(
                 padding: EdgeInsets.fromLTRB(16, 4, 16, 4),
@@ -503,12 +564,38 @@ class _ChatScreenState extends State<ChatScreen> {
         .showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// Phase 6: WiFi mesh toggle + indicator, present only when running on
+  /// the BLE+WiFi failover transport (plain-transport tests are unaffected).
+  FailoverTransport? get _failover => widget.transport is FailoverTransport
+      ? widget.transport as FailoverTransport
+      : null;
+
+  Future<void> _toggleWifiMesh(FailoverTransport failover) async {
+    if (failover.wifiEnabled.value) {
+      // Off: clean disconnect back to BLE-only — no confirmation needed.
+      await failover.disableWifi();
+    } else {
+      await enableWifiMeshWithWarnings(context, failover);
+    }
+    if (mounted) setState(() {});
+  }
+
   @override
   Widget build(BuildContext context) {
+    final failover = _failover;
     return Scaffold(
       appBar: AppBar(
         title: const Text('MeshLink chat (Phase 1)'),
         actions: [
+          if (failover != null)
+            ValueListenableBuilder<bool>(
+              valueListenable: failover.wifiEnabled,
+              builder: (context, enabled, _) => IconButton(
+                icon: Icon(enabled ? Icons.wifi : Icons.wifi_off),
+                tooltip: enabled ? 'Leave mesh WiFi' : 'Join mesh WiFi',
+                onPressed: () => _toggleWifiMesh(failover),
+              ),
+            ),
           IconButton(
             icon: const Icon(Icons.science_outlined),
             tooltip: 'Test menu',
@@ -518,6 +605,10 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Column(
         children: [
+          if (widget.batteryTier != null)
+            BatteryTierIndicator(manager: widget.batteryTier!),
+          if (failover != null)
+            MeshStatusIndicator(wifiEnabled: failover.wifiEnabled),
           if (_transportError != null)
             Container(
               width: double.infinity,

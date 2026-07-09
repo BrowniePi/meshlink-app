@@ -25,6 +25,15 @@ Mutual Consent / Node-Served Location). Counterpart notes:
    `beacon_age_s` as "updated Ns ago". Any refusal — never granted, revoked,
    expired, rate-limited, unknown user — renders identically as
    "Location not available".
+5. **Direct messages** (added after the initial four) —
+   `ui/direct_message_screen.dart`, from the chat-bubble icon on a friend's
+   row. DIRECT_MESSAGE (0x0D) = 8-byte recipient hint + text sealed to the
+   friend's X25519 key (≤ 265 UTF-8 bytes); relays and nodes carry it
+   opaque, and it never touches the backend. Mutual consent gates messaging
+   too: sending requires FRIENDS state, and inbound DMs are silently dropped
+   unless the Ed25519-verified envelope sender is a pinned FRIENDS-state
+   peer. Delivery is best-effort spray-and-wait (no receipts); history is
+   capped at 200 messages per friend in the same secure-storage blob.
 
 ## New library code
 
@@ -98,6 +107,7 @@ Mutual Consent / Node-Served Location). Counterpart notes:
 
 ## Out of scope (per spec)
 
-Group location, DMs, location history, any password system, and the
-node-blind "Model B" (future high-privacy mode — would move matching into
-sealed blobs so even the node can't see who asks about whom).
+Group location, location history, any password system, and the node-blind
+"Model B" (future high-privacy mode — would move matching into sealed blobs
+so even the node can't see who asks about whom). Friend DMs were originally
+out of scope but were added later on this branch (flow 5 above).

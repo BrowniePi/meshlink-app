@@ -27,6 +27,9 @@ const int msgTypeLocationQuery = 0x0A;
 const int msgTypeLocationResponse = 0x0B;
 const int msgTypeLocationRevoke = 0x0C;
 
+/// Friend → friend text, sealed to the recipient; relays carry it opaque.
+const int msgTypeDirectMessage = 0x0D;
+
 /// Derive the 16-byte content-addressable msg_id per docs/message-format.md
 /// §3: BLAKE3(sender_key ‖ timestamp_be4 ‖ msg_type_byte ‖ payload)[0:16].
 /// Must match the Python core byte-for-byte (blake3 package there,

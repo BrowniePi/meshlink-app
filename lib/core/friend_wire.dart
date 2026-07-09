@@ -18,6 +18,9 @@ import 'sealed.dart';
 const int recipientHintSize = 8;
 const int maxUsernameBytes = 32;
 
+/// DIRECT_MESSAGE text cap: 321-byte payload − 8 hint − 48 seal overhead.
+const int maxDmTextBytes = 265;
+
 class FriendRequestPayload {
   FriendRequestPayload(this.username, this.curve25519Pub, this.ed25519Pub);
   final String username;
@@ -137,6 +140,30 @@ Future<FriendAcceptPayload> decodeFriendAccept(
     throw const FormatException('trailing bytes in FRIEND_ACCEPT payload');
   }
   return FriendAcceptPayload(name, curvePub, edPub, token);
+}
+
+/// DIRECT_MESSAGE: hint + seal(utf-8 text). Sender authenticity is the
+/// envelope's Ed25519 signature (pipeline step 6); the recipient additionally
+/// requires the envelope sender to be a pinned FRIENDS-state peer — mutual
+/// consent gates messaging, not just location.
+Future<Uint8List> encodeDirectMessage(
+    String text, Uint8List recipientHint, Uint8List recipientCurvePub) async {
+  final body = utf8.encode(text);
+  if (body.isEmpty || body.length > maxDmTextBytes) {
+    throw ArgumentError('DM text must be 1-$maxDmTextBytes UTF-8 bytes');
+  }
+  return Uint8List.fromList(
+      [...recipientHint, ...await seal(Uint8List.fromList(body), recipientCurvePub)]);
+}
+
+Future<String> decodeDirectMessage(
+    Uint8List raw, SimpleKeyPair recipientCurveKeyPair) async {
+  final body =
+      await unseal(raw.sublist(recipientHintSize), recipientCurveKeyPair);
+  if (body.isEmpty || body.length > maxDmTextBytes) {
+    throw const FormatException('DIRECT_MESSAGE payload malformed');
+  }
+  return utf8.decode(body);
 }
 
 /// FRIEND_DECLINE: minimal by design — hint + declined request's msg_id.

@@ -85,9 +85,12 @@ were started with.
 From the chat screen's people icon: friend request/accept (mutual consent —
 accepting asks the location question separately), a per-friend "Share my
 location" switch (mints/revokes a 24 h capability token; the 120 s location
-beacon runs only while at least one share is on), and a friend map that polls
-the node at most every 60 s and shows "updated Ns ago". Any refusal renders
-as "Location not available", deliberately without saying why. Friendship
+beacon runs only while at least one share is on), a friend map that polls
+the node at most every 60 s and shows "updated Ns ago", and one-to-one
+direct messages (sealed to the friend's key — relays, nodes, and the backend
+never see the text; only mutual friends can message each other). Any
+location refusal renders as "Location not available", deliberately without
+saying why. Friendship
 state lives on the phone (Keychain/Keystore) and mirrors to the backend
 best-effort — the mesh works with the backend down. Details and invariants:
 `docs/friendship-and-location.md`.

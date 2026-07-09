@@ -127,6 +127,29 @@ void main() {
     expect(ByteData.sublistView(raw).getUint32(16), 1751400000);
   });
 
+  test('DIRECT_MESSAGE round-trips and opens only for the recipient',
+      () async {
+    final raw =
+        await encodeDirectMessage('meet at gate B ☕', hint, recipientCurvePub);
+    expect(recipientHintOf(raw), hint);
+    expect(await decodeDirectMessage(raw, recipientCurveKp), 'meet at gate B ☕');
+
+    final stranger = await X25519().newKeyPair();
+    expect(() => decodeDirectMessage(raw, stranger),
+        throwsA(isA<SealedEnvelopeError>()));
+  });
+
+  test('DIRECT_MESSAGE enforces the 1–265 byte text bounds', () async {
+    expect(() => encodeDirectMessage('', hint, recipientCurvePub),
+        throwsArgumentError);
+    // 133 three-byte runes = 399 bytes: over the cap despite < 265 chars.
+    expect(() => encodeDirectMessage('☕' * 133, hint, recipientCurvePub),
+        throwsArgumentError);
+    final max = 'm' * maxDmTextBytes;
+    final raw = await encodeDirectMessage(max, hint, recipientCurvePub);
+    expect(await decodeDirectMessage(raw, recipientCurveKp), max);
+  });
+
   test('every friendship payload fits the §2 envelope bounds', () async {
     // Envelope overhead is 75 (header) + 64 (signature) = 139 bytes; max
     // packet 460 → max payload 321. Use the largest legal username.
@@ -155,6 +178,8 @@ void main() {
           issuedAt: 0,
           nonce: Uint8List(8)),
       'LOCATION beacon': encodeLocationBeacon(0, 0, 0),
+      'DIRECT_MESSAGE max': await encodeDirectMessage(
+          'm' * maxDmTextBytes, hint, recipientCurvePub),
     };
     for (final entry in payloads.entries) {
       expect(entry.value.length, lessThanOrEqualTo(maxPayload),

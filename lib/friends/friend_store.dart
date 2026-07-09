@@ -4,18 +4,41 @@ import 'dart:typed_data';
 import '../identity/secure_storage.dart';
 import 'friend_state.dart';
 
+/// One direct message in a conversation, as this phone saw it. DMs live on
+/// the phones only — they never touch the backend or the node's storage.
+class DirectMessage {
+  DirectMessage({required this.text, required this.outgoing, required this.at});
+  final String text;
+  final bool outgoing;
+  final DateTime at;
+}
+
+/// Newest messages kept per friend — bounds the secure-storage blob.
+const int maxDmHistory = 200;
+
 /// Persisted state for one friend: the state-machine record plus the two
-/// capability tokens in play (mine-to-them, theirs-to-me) and bookkeeping
-/// for accept/decline.
+/// capability tokens in play (mine-to-them, theirs-to-me), the DM
+/// conversation, and bookkeeping for accept/decline.
 class FriendEntry {
   FriendEntry({
     required this.record,
     this.myTokenToThem,
     this.theirTokenToMe,
     this.pendingRequestMsgId,
-  });
+    List<DirectMessage>? messages,
+  }) : messages = messages ?? [];
 
   FriendshipRecord record;
+
+  /// DM history with this friend, oldest first, capped at [maxDmHistory].
+  final List<DirectMessage> messages;
+
+  void addMessage(DirectMessage message) {
+    messages.add(message);
+    if (messages.length > maxDmHistory) {
+      messages.removeRange(0, messages.length - maxDmHistory);
+    }
+  }
 
   /// Token I minted granting THEM my location — resent on refresh.
   Uint8List? myTokenToThem;
@@ -71,6 +94,14 @@ class FriendStore {
         myTokenToThem: _optBytes(m['my_token']),
         theirTokenToMe: _optBytes(m['their_token']),
         pendingRequestMsgId: _optBytes(m['pending_msg_id']),
+        messages: [
+          for (final d in (m['messages'] as List? ?? []).cast<Map<String, dynamic>>())
+            DirectMessage(
+              text: d['text'] as String,
+              outgoing: d['out'] as bool,
+              at: DateTime.fromMillisecondsSinceEpoch((d['at'] as num).toInt()),
+            ),
+        ],
       );
       _entries[entry.record.peerUsername] = entry;
     }
@@ -102,6 +133,10 @@ class FriendStore {
           'pending_msg_id': e.pendingRequestMsgId == null
               ? null
               : _hex(e.pendingRequestMsgId!),
+          'messages': [
+            for (final d in e.messages)
+              {'text': d.text, 'out': d.outgoing, 'at': d.at.millisecondsSinceEpoch}
+          ],
         }
     ];
     await _storage.write(_key, jsonEncode(list));

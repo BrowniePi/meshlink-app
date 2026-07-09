@@ -9,6 +9,7 @@ import '../core/message.dart';
 import '../core/message_factory.dart';
 import '../core/pipeline.dart';
 import '../debug/debug_log.dart' as dbg;
+import '../friends/friend_service.dart';
 import '../identity/device_identity.dart';
 import '../identity/token_storage.dart';
 import '../onboarding/wifi_mesh_toggle.dart';
@@ -17,6 +18,7 @@ import '../transport/failover_transport.dart';
 import '../transport/transport.dart';
 import '../ble_poc/ble_scan_poc_screen.dart';
 import 'ble_log_screen.dart';
+import 'friends_screen.dart';
 import 'packet_info_sheet.dart';
 import 'widgets/battery_tier_indicator.dart';
 import 'widgets/mesh_status_indicator.dart';
@@ -77,11 +79,17 @@ class ChatScreen extends StatefulWidget {
     required this.attestationToken,
     required this.onTokenExpired,
     this.batteryTier,
+    this.friendService,
   });
 
   final Transport transport;
   final RelayPipeline pipeline;
   final DeviceIdentity identity;
+
+  /// Friendship flows (requests, location sharing). Delivered non-TEXT
+  /// messages are offered to it before display; the people icon opens the
+  /// friends screen. Optional so transport-contract tests are unaffected.
+  final FriendService? friendService;
 
   /// Phase 7 battery tiers: drives the mode strip, the test menu's force
   /// options, and the Ticket-only messaging cut-off. Optional so transport-
@@ -135,6 +143,11 @@ class _ChatScreenState extends State<ChatScreen> {
     widget.transport.start().catchError((Object e) {
       if (mounted) setState(() => _transportError = 'Transport: $e');
     });
+    // The friend/location path (beacon, query, DM, friend request) may be the
+    // first traffic we send through a node — before any chat message. Let it
+    // present our token too, reusing this screen's dedup + expiry handling, so
+    // the node doesn't drop it as unattested.
+    widget.friendService?.presentAttestation = _presentToPeers;
   }
 
   /// True if the token has expired. When it has, ask the app to re-onboard
@@ -188,6 +201,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    // Don't leave the friend service calling back into a disposed State.
+    widget.friendService?.presentAttestation = null;
     widget.transport.stop();
     _input.dispose();
     super.dispose();
@@ -211,6 +226,18 @@ class _ChatScreenState extends State<ChatScreen> {
       dbg.DebugLog.instance.log(
           'pipeline', 'DROPPED ${data.length}B from $peerId: ${result.dropReason}',
           level: dbg.LogLevel.warn);
+    }
+
+    if (result.outcome == Outcome.deliver) {
+      // Friendship/location traffic rides the same pipeline as chat; offer
+      // every delivered non-TEXT message to the friend service, which
+      // consumes what's addressed to us (and ignores the rest — already
+      // relayed by the mesh, nothing to display).
+      final message = result.message!;
+      if (message.msgType != msgTypeText) {
+        await widget.friendService?.handleMessage(message);
+        return; // binary protocol traffic is never rendered as chat
+      }
     }
 
     if (!mounted) return;
@@ -587,6 +614,14 @@ class _ChatScreenState extends State<ChatScreen> {
       appBar: AppBar(
         title: const Text('MeshLink chat (Phase 1)'),
         actions: [
+          if (widget.friendService != null)
+            IconButton(
+              icon: const Icon(Icons.people_outline),
+              tooltip: 'Friends',
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => FriendsScreen(friends: widget.friendService!),
+              )),
+            ),
           if (failover != null)
             ValueListenableBuilder<bool>(
               valueListenable: failover.wifiEnabled,

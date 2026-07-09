@@ -9,9 +9,26 @@ import 'message.dart';
 /// Message type enum values from docs/message-format.md §4.
 const int msgTypeText = 0x01;
 
+/// Location beacon (phone → node, every 120 s while sharing is active).
+/// Reuses the pre-existing LOCATION type — no new beacon type.
+const int msgTypeLocation = 0x02;
+
 /// Attestation-presentation message (Phase 5): payload is the organiser JWT
 /// (ASCII). Must stay identical across the Python core, node, and Dart app.
 const int msgTypeAttestation = 0x06;
+
+/// Friendship + node-served location (Phase 5 extension). Wire constants
+/// shared with meshlink-core pipeline/message.py MessageType — never
+/// renumber.
+const int msgTypeFriendRequest = 0x07;
+const int msgTypeFriendAccept = 0x08;
+const int msgTypeFriendDecline = 0x09;
+const int msgTypeLocationQuery = 0x0A;
+const int msgTypeLocationResponse = 0x0B;
+const int msgTypeLocationRevoke = 0x0C;
+
+/// Friend → friend text, sealed to the recipient; relays carry it opaque.
+const int msgTypeDirectMessage = 0x0D;
 
 /// Derive the 16-byte content-addressable msg_id per docs/message-format.md
 /// §3: BLAKE3(sender_key ‖ timestamp_be4 ‖ msg_type_byte ‖ payload)[0:16].

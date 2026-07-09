@@ -257,6 +257,31 @@ void main() {
         throwsStateError);
   });
 
+  test('friend/location traffic presents the attestation token first',
+      () async {
+    // Regression: an attestation-gated node drops this device's packets
+    // (pipeline step 7) until it has cached our token. The friend path can be
+    // the first thing a phone sends through a node — before any chat message
+    // triggers presentation — so _sendToPeers must present first, or the node
+    // silently drops the query and the user sees "location not available".
+    await befriend();
+
+    var presentCalls = 0;
+    int? sentWhenPresented; // packets already on the wire when we presented
+    alice.friends.presentAttestation = () async {
+      presentCalls++;
+      sentWhenPresented = alice.transport.sent.length;
+    };
+
+    alice.transport.drain();
+    await alice.friends.sendDirectMessage('bob', 'hi');
+
+    expect(presentCalls, 1, reason: 'presented once before the friend packet');
+    expect(sentWhenPresented, 0,
+        reason: 'token presentation must precede the packet on the wire');
+    expect(alice.transport.sent, hasLength(1));
+  });
+
   test('friendship state survives a restart (persisted to secure storage)',
       () async {
     await befriend(bobSharesAtAccept: true);

@@ -65,6 +65,16 @@ class FriendService extends ChangeNotifier {
   final PositionReader _readPosition;
   final DateTime Function() _now;
 
+  /// Present our attestation token to any not-yet-presented peer before we
+  /// send friend/location traffic. An attestation-gated node drops this
+  /// device's packets (pipeline step 7) until it has cached our token, and the
+  /// friend path — a location poll, a beacon, a friend request — is often the
+  /// first traffic a phone sends through a node, before any chat message ever
+  /// triggers presentation. Wired by [ChatScreen], which owns the token and
+  /// the per-peer presented-set; left null in tests (the loopback mesh has no
+  /// attestation-gated node).
+  Future<void> Function()? presentAttestation;
+
   late final Uint8List _ephemId;
   Timer? _beaconTimer;
   Timer? _refreshTimer;
@@ -547,6 +557,11 @@ class FriendService extends ChangeNotifier {
       _log('not sent (own pipeline): ${result.dropReason}');
       return;
     }
+    // Make sure the node has our attestation token before this packet — the
+    // friend/location path can be the first thing we send through a node, and
+    // step 7 drops us as unattested otherwise (a silent "location not
+    // available"). No-op once presented, and null in tests.
+    await presentAttestation?.call();
     for (final peer in transport.listPeers()) {
       try {
         await transport.send(peer, packet);

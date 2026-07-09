@@ -143,6 +143,11 @@ class _ChatScreenState extends State<ChatScreen> {
     widget.transport.start().catchError((Object e) {
       if (mounted) setState(() => _transportError = 'Transport: $e');
     });
+    // The friend/location path (beacon, query, DM, friend request) may be the
+    // first traffic we send through a node — before any chat message. Let it
+    // present our token too, reusing this screen's dedup + expiry handling, so
+    // the node doesn't drop it as unattested.
+    widget.friendService?.presentAttestation = _presentToPeers;
   }
 
   /// True if the token has expired. When it has, ask the app to re-onboard
@@ -196,6 +201,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    // Don't leave the friend service calling back into a disposed State.
+    widget.friendService?.presentAttestation = null;
     widget.transport.stop();
     _input.dispose();
     super.dispose();

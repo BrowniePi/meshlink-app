@@ -83,6 +83,16 @@ void main() {
     expect(_hex(decoded.ed25519Pub), v['sender_ed25519_pub_hex']);
   });
 
+  test('Dart decodes a Python-encoded DIRECT_MESSAGE', () async {
+    final v = fixture['direct_message'] as Map<String, dynamic>;
+    final raw = _fromHex(v['payload_hex'] as String);
+    expect(_hex(recipientHintOf(raw)), v['hint_hex']);
+
+    final recipient = await X25519()
+        .newKeyPairFromSeed(_fromHex(v['recipient_x25519_seed_hex'] as String));
+    expect(await decodeDirectMessage(raw, recipient), v['text']);
+  });
+
   test('Dart decodes a Python-encoded LOCATION_RESPONSE (the node path)',
       () async {
     final v = fixture['location_response'] as Map<String, dynamic>;

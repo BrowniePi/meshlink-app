@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../friends/directory_client.dart';
 import '../friends/friend_service.dart';
 import '../friends/friend_store.dart';
+import 'direct_message_screen.dart';
 import 'friend_map_screen.dart';
 
 /// Friends list: inbound requests (explicit Accept / Decline — never
@@ -163,15 +164,30 @@ class _FriendsScreenState extends State<FriendsScreen> {
           subtitle: Text(theyShare
               ? 'shares their location with you'
               : 'does not share their location'),
-          trailing: IconButton(
-            icon: const Icon(Icons.map_outlined),
-            tooltip: theyShare ? 'View on map' : 'Location not available',
-            onPressed: () => Navigator.of(context).push(MaterialPageRoute(
-              builder: (_) => FriendMapScreen(
-                friends: widget.friends,
-                username: username,
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.chat_bubble_outline),
+                tooltip: 'Message',
+                onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => DirectMessageScreen(
+                    friends: widget.friends,
+                    username: username,
+                  ),
+                )),
               ),
-            )),
+              IconButton(
+                icon: const Icon(Icons.map_outlined),
+                tooltip: theyShare ? 'View on map' : 'Location not available',
+                onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => FriendMapScreen(
+                    friends: widget.friends,
+                    username: username,
+                  ),
+                )),
+              ),
+            ],
           ),
         ),
         SwitchListTile(

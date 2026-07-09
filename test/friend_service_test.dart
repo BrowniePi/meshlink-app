@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:meshlink_app/core/message_factory.dart';
 import 'package:meshlink_app/friends/directory_client.dart';
 import 'package:meshlink_app/friends/friend_state.dart';
+import 'package:meshlink_app/friends/friend_store.dart';
 
 import 'helpers/friend_fakes.dart';
 
@@ -198,6 +199,63 @@ void main() {
     expect(carol.transport.sent.map((p) => p[72]),
         contains(msgTypeLocationQuery));
   }, timeout: const Timeout(Duration(minutes: 1)));
+
+  test('flow 5: DMs deliver both ways and the history survives a restart',
+      () async {
+    await befriend();
+
+    await alice.friends.sendDirectMessage('bob', 'meet at gate B');
+    await alice.deliverTo(bob);
+    await bob.friends.sendDirectMessage('alice', 'on my way ☕');
+    await bob.deliverTo(alice);
+
+    final bobSees = bob.friends.store.byUsername('alice')!.messages;
+    expect(bobSees.map((m) => (m.text, m.outgoing)),
+        [('meet at gate B', false), ('on my way ☕', true)]);
+    final aliceSees = alice.friends.store.byUsername('bob')!.messages;
+    expect(aliceSees.map((m) => (m.text, m.outgoing)),
+        [('meet at gate B', true), ('on my way ☕', false)]);
+
+    // Same storage, fresh service — the conversation survives a relaunch.
+    final revived = await FakePhone.createWithStorage(alice.storage, registry);
+    addTearDown(revived.friends.dispose);
+    expect(revived.friends.store.byUsername('bob')!.messages.length, 2);
+  });
+
+  test('flow 5: a DM only renders for its addressee and only from a friend',
+      () async {
+    await befriend();
+    final mallory = await FakePhone.create(registry);
+    addTearDown(mallory.friends.dispose);
+    await mallory.friends.createAccount('mallory');
+
+    // Alice→Bob traffic relayed through Mallory's phone: unreadable, ignored.
+    await alice.friends.sendDirectMessage('bob', 'secret plans');
+    await alice.deliverTo(mallory);
+    expect(mallory.friends.store.entries, isEmpty);
+
+    // A DM from a non-friend — even correctly sealed and addressed — is a
+    // silent drop: mutual consent gates messaging, not just location.
+    await mallory.friends.store.put(FriendEntry(
+        record: FriendshipRecord(
+      peerUsername: 'bob',
+      peerCurve25519Pub: bob.friends.encryption.publicKey,
+      peerEd25519Pub: bob.friends.identity.publicKey,
+      state: FriendshipState.friends,
+    )));
+    await mallory.friends.sendDirectMessage('bob', 'hello friend');
+    await mallory.deliverTo(bob);
+    expect(bob.friends.store.byUsername('mallory'), isNull);
+    expect(
+        bob.friends.store.entries
+            .expand((e) => e.messages)
+            .where((m) => m.text == 'hello friend'),
+        isEmpty);
+
+    // Sending to a non-friend is refused before anything hits the wire.
+    expect(() => bob.friends.sendDirectMessage('mallory', 'hi'),
+        throwsStateError);
+  });
 
   test('friendship state survives a restart (persisted to secure storage)',
       () async {

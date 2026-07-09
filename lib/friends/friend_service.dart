@@ -235,6 +235,27 @@ class FriendService extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ---- flow 5: direct messages ----
+
+  /// Send [text] to a friend, sealed to their pinned X25519 key. Best-effort
+  /// like all mesh traffic (spray-and-wait, no delivery receipt); the local
+  /// copy is appended to the conversation immediately.
+  Future<void> sendDirectMessage(String username, String text) async {
+    final entry = store.byUsername(username);
+    if (entry == null || entry.record.state != FriendshipState.friends) {
+      throw StateError('not friends with $username');
+    }
+    final payload = await encodeDirectMessage(
+      text,
+      pubkeyId(entry.record.peerEd25519Pub),
+      entry.record.peerCurve25519Pub,
+    );
+    await _sendToPeers(msgTypeDirectMessage, payload);
+    entry.addMessage(DirectMessage(text: text, outgoing: true, at: _now()));
+    await store.put(entry);
+    notifyListeners();
+  }
+
   // ---- flow 4: see a friend's location ----
 
   /// Query the node for [username]'s last-known coordinate using the
@@ -281,6 +302,8 @@ class FriendService extends ChangeNotifier {
         return _onLocationResponse(msg);
       case msgTypeLocationRevoke:
         return _onLocationRevoke(msg);
+      case msgTypeDirectMessage:
+        return _onDirectMessage(msg);
       case msgTypeLocationQuery:
       case msgTypeLocation:
         return true; // node-terminated types; nothing for a phone to do
@@ -371,6 +394,29 @@ class FriendService extends ChangeNotifier {
     final (next, _) = _tryTransition(entry.record, FriendEvent.recvDecline);
     if (next == null) return true;
     entry.record = next;
+    await store.put(entry);
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> _onDirectMessage(Message msg) async {
+    if (!_isForMe(msg)) return true; // someone else's mail; already relayed
+    // Mutual consent gates messaging too: the envelope sender (Ed25519-
+    // verified at pipeline step 6) must be a pinned friend in FRIENDS state.
+    // Anything else — stranger, declined, unfriended — is a silent drop.
+    final entry = store.byEd25519Pub(Uint8List.fromList(msg.senderKey));
+    if (entry == null || entry.record.state != FriendshipState.friends) {
+      _log('DIRECT_MESSAGE from non-friend — dropped');
+      return true;
+    }
+    final String text;
+    try {
+      text = await decodeDirectMessage(msg.payload, encryption.keyPair);
+    } catch (e) {
+      _log('undecodable DIRECT_MESSAGE: $e');
+      return true;
+    }
+    entry.addMessage(DirectMessage(text: text, outgoing: false, at: _now()));
     await store.put(entry);
     notifyListeners();
     return true;

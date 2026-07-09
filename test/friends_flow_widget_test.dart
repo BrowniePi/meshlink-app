@@ -10,6 +10,7 @@ import 'package:meshlink_app/friends/friend_store.dart';
 import 'package:meshlink_app/identity/device_identity.dart';
 import 'package:meshlink_app/identity/encryption_identity.dart';
 import 'package:meshlink_app/onboarding/account_screen.dart';
+import 'package:meshlink_app/ui/direct_message_screen.dart';
 import 'package:meshlink_app/ui/friend_map_screen.dart';
 import 'package:meshlink_app/ui/friends_screen.dart';
 
@@ -208,6 +209,32 @@ void main() {
 
       await tester.pumpWidget(const SizedBox());
       friends.dispose();
+    });
+  });
+
+  group('flow 5 — direct messages', () {
+    testWidgets('sending renders an outgoing bubble; inbound appears live',
+        (tester) async {
+      await seedEntry(FriendshipState.friends);
+      await tester.pumpWidget(MaterialApp(
+        home: DirectMessageScreen(friends: me.friends, username: 'alice'),
+      ));
+      expect(find.textContaining('No messages yet'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), 'meet at gate B');
+      await tester.tap(find.byTooltip('Send'));
+      await tester.pump();
+      expect(find.text('meet at gate B'), findsOneWidget);
+
+      // An inbound message lands via the service listener, no navigation.
+      me.friends.store
+          .byUsername('alice')!
+          .addMessage(DirectMessage(
+              text: 'on my way', outgoing: false, at: DateTime.now()));
+      // ignore: invalid_use_of_protected_member, invalid_use_of_visible_for_testing_member
+      me.friends.notifyListeners();
+      await tester.pump();
+      expect(find.text('on my way'), findsOneWidget);
     });
   });
 }

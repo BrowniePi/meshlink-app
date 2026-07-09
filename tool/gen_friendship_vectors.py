@@ -26,7 +26,11 @@ from nacl.signing import SigningKey  # noqa: E402
 
 from capability.token import issue  # noqa: E402
 from crypto.sealed import seal  # noqa: E402
-from friends.wire import FriendRequestPayload, encode_friend_request  # noqa: E402
+from friends.wire import (  # noqa: E402
+    FriendRequestPayload,
+    encode_direct_message,
+    encode_friend_request,
+)
 from location.wire import LocationResponsePayload, encode_location_response  # noqa: E402
 
 OUT = pathlib.Path(__file__).resolve().parents[1] / "test" / "fixtures" / \
@@ -64,6 +68,9 @@ def main() -> None:
         bytes(recipient_x.public_key),
     )
 
+    direct_message = encode_direct_message(
+        "meet at gate B ☕", HINT, bytes(recipient_x.public_key))
+
     location_response = encode_location_response(
         LocationResponsePayload(
             lat_microdeg=37774900,
@@ -100,6 +107,12 @@ def main() -> None:
             "sender_ed25519_pub_hex": bytes(grantee.verify_key).hex(),
             "hint_hex": HINT.hex(),
             "payload_hex": friend_request.hex(),
+        },
+        "direct_message": {
+            "recipient_x25519_seed_hex": RECIPIENT_X_SEED.hex(),
+            "text": "meet at gate B ☕",
+            "hint_hex": HINT.hex(),
+            "payload_hex": direct_message.hex(),
         },
         "location_response": {
             "requester_x25519_seed_hex": RECIPIENT_X_SEED.hex(),

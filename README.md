@@ -55,13 +55,28 @@ first scan. Emulators generally have no usable BLE stack; use a real device.
 ### Pointing at a backend (Phase 5)
 
 Onboarding needs to reach a running `meshlink-backend` to fetch an attestation
-token. `localhost`/`127.0.0.1` refers to the phone itself, not your dev
-machine, so on a physical device pass the backend's LAN IP explicitly:
-To get IP use
+token. By default the app points at the hosted backend
+(`https://meshlink-backend-0l2d.onrender.com`), so a plain
+
+```
+flutter run
+```
+
+works out of the box on both emulators/simulators and physical devices — no
+LAN IP needed.
+
+Render's free tier spins down when idle, so the first request after a period
+of inactivity can take up to ~30-50s to wake. The onboarding attestation call
+has a 10s timeout and surfaces this as a retryable "Backend timed out — try
+again" error rather than a crash — if you see that once at the start of a
+demo, it's the backend waking up, not a bug; retry.
+
+To point at a backend running locally instead (`localhost`/`127.0.0.1` refers
+to the phone itself, not your dev machine, so on a physical device you need
+the backend machine's LAN IP):
 ```
 ipconfig getifaddr en0 || ipconfig getifaddr en1
 ```
-And to run use
 ```
 flutter run \
   --dart-define=MESHLINK_BACKEND_URL=http://192.168.1.14:8000 \
@@ -69,18 +84,19 @@ flutter run \
 ```
 
 The phone and the machine running the backend must be on the same network.
-`event_id` must match what the backend and node are configured for. See
-`lib/config/backend_config.dart` for defaults (Android emulator: `10.0.2.2`;
-iOS simulator: `localhost` works as-is).
+`event_id` is a per-ticket field (supplied at `POST /tickets`), not a
+backend-wide setting — it must match what the ticket was actually issued
+with. See `lib/config/backend_config.dart` for defaults.
 
 ### Friends & location sharing (Friendship branch)
 
-The same two `--dart-define`s also feed the friendship directory — no extra
-config. After attestation, onboarding asks for a username (`POST /account`
-registers it with both device public keys), and "Add friend" resolves
-usernames via `GET /directory/{username}`. So the full demo run is exactly
-the command above, against the same backend and the same event id the nodes
-were started with.
+The same backend config also feeds the friendship directory — no extra setup.
+After attestation, onboarding asks for a username (registered with both
+device public keys via signup), and "Add friend" resolves usernames via
+`GET /directory/{username}`. So the full demo run needs no flags at all
+against the hosted backend, as long as the event id matches what the nodes
+were started with (override with `--dart-define=MESHLINK_EVENT_ID=...` if
+not).
 
 From the chat screen's people icon: friend request/accept (mutual consent —
 accepting asks the location question separately), a per-friend "Share my

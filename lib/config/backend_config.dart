@@ -1,13 +1,15 @@
 /// Backend + event configuration for the Phase 5 attestation flow.
 ///
-/// Both are compile-time overridable so a build can target a real organiser
+/// Both are compile-time overridable so a build can target a different
 /// backend without code changes:
 ///   flutter run --dart-define=MESHLINK_BACKEND_URL=http://192.168.1.20:8000 \
 ///               --dart-define=MESHLINK_EVENT_ID=summerfest-2026
 ///
-/// Defaults suit local development: the Android emulator reaches the host
-/// machine at 10.0.2.2. On a physical phone you must pass the organiser
-/// machine's LAN IP via --dart-define; localhost/10.0.2.2 won't resolve.
+/// Defaults point at the hosted meshlink-backend
+/// (https://meshlink-backend-0l2d.onrender.com), so a plain `flutter run`
+/// works out of the box on both emulators/simulators and physical devices.
+/// Pass `--dart-define=MESHLINK_BACKEND_URL=http://<lan-ip>:8000` to target a
+/// backend running locally for dev instead.
 class BackendConfig {
   const BackendConfig({required this.baseUrl, required this.eventId});
 
@@ -20,7 +22,7 @@ class BackendConfig {
   static const BackendConfig fromEnvironment = BackendConfig(
     baseUrl: String.fromEnvironment(
       'MESHLINK_BACKEND_URL',
-      defaultValue: 'http://10.0.2.2:8000',
+      defaultValue: 'https://meshlink-backend-0l2d.onrender.com',
     ),
     eventId: String.fromEnvironment(
       'MESHLINK_EVENT_ID',

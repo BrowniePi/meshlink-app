@@ -3,6 +3,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 
+import 'auth/auth_client.dart';
+import 'auth/auth_service.dart';
+import 'auth/login_screen.dart';
+import 'auth/session_storage.dart';
+import 'auth/welcome_screen.dart';
 import 'ble_poc/ble_scan_poc_screen.dart';
 import 'config/backend_config.dart';
 import 'config/wifi_config.dart';
@@ -14,7 +19,6 @@ import 'identity/device_identity.dart';
 import 'identity/encryption_identity.dart';
 import 'identity/secure_storage.dart';
 import 'identity/token_storage.dart';
-import 'onboarding/account_screen.dart';
 import 'onboarding/attestation_flow.dart';
 import 'onboarding/onboarding_screen.dart';
 import 'onboarding/wifi_mesh_toggle.dart';
@@ -24,7 +28,7 @@ import 'transport/ble_transport.dart';
 import 'transport/failover_transport.dart';
 import 'transport/relay_service.dart';
 import 'transport/wifi_transport.dart';
-import 'ui/chat_screen.dart';
+import 'ui/firefly/firefly_home.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -45,14 +49,35 @@ Future<void> main() async {
   final validToken =
       (stored != null && !stored.isExpiredAt(DateTime.now())) ? stored : null;
 
+  // Account session (email + password auth), independent of the attestation
+  // token and the device keypairs. Restored from secure storage if present;
+  // the first gate is login when it isn't.
+  final authService = AuthService(
+    client: AuthClient(config: BackendConfig.fromEnvironment),
+    sessionStorage: SessionStorage(storage),
+    identity: identity,
+    encryption: encryption,
+    tokenStorage: tokenStorage,
+  );
+  await authService.init();
+
+  // The welcome/onboarding intro is shown once, after the first verified
+  // login. Persisted so returning users skip it.
+  final welcomeSeen = await storage.read(_welcomeSeenKey) == 'true';
+
   runApp(MeshLinkApp(
     identity: identity,
     encryption: encryption,
     storage: storage,
     tokenStorage: tokenStorage,
+    authService: authService,
     initialToken: validToken,
+    initialWelcomeSeen: welcomeSeen,
   ));
 }
+
+/// Secure-storage key marking that the post-first-login welcome intro ran.
+const String _welcomeSeenKey = 'meshlink_welcome_seen_v1';
 
 class MeshLinkApp extends StatefulWidget {
   const MeshLinkApp({
@@ -61,14 +86,18 @@ class MeshLinkApp extends StatefulWidget {
     required this.encryption,
     required this.storage,
     required this.tokenStorage,
+    required this.authService,
     this.initialToken,
+    this.initialWelcomeSeen = false,
   });
 
   final DeviceIdentity identity;
   final EncryptionIdentity encryption;
   final SecureStorage storage;
   final TokenStorage tokenStorage;
+  final AuthService authService;
   final AttestationToken? initialToken;
+  final bool initialWelcomeSeen;
 
   @override
   State<MeshLinkApp> createState() => _MeshLinkAppState();
@@ -107,10 +136,14 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
   /// token skips straight to chat, where the AppBar toggle takes over.
   bool _wifiOffered = false;
 
+  /// Whether the one-time post-first-login welcome intro has been shown.
+  late bool _welcomeSeen;
+
   @override
   void initState() {
     super.initState();
     _wifiOffered = widget.initialToken != null;
+    _welcomeSeen = widget.initialWelcomeSeen;
     _batteryTier.tier.addListener(_onTierChanged);
     _batteryTier.start();
 
@@ -123,9 +156,21 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
       pipeline: _pipeline,
       readPosition: _readBeaconPosition,
     );
+    // Auth binds the account's username into this FriendService on login.
+    widget.authService.attachFriends(_friends);
+    widget.authService.addListener(_onAuthChanged);
     unawaited(_friends.init().then((_) {
       if (mounted) setState(() => _friendsReady = true);
     }));
+  }
+
+  void _onAuthChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _markWelcomeSeen() async {
+    await widget.storage.write(_welcomeSeenKey, 'true');
+    if (mounted) setState(() => _welcomeSeen = true);
   }
 
   /// Position source for the friend-location beacon. Same permission-aware
@@ -172,6 +217,7 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
   void dispose() {
     _batteryTier.tier.removeListener(_onTierChanged);
     _batteryTier.stop();
+    widget.authService.removeListener(_onAuthChanged);
     _friends.dispose();
     super.dispose();
   }
@@ -179,22 +225,25 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
   @override
   Widget build(BuildContext context) {
     final Widget home;
-    if (_token == null) {
+    if (!_friendsReady) {
+      // Friend store still loading from secure storage (fast, one read).
+      home = const Scaffold(body: Center(child: CircularProgressIndicator()));
+    } else if (!widget.authService.isLoggedIn) {
+      // Account gate: login runs first so the device's keypairs bind to the
+      // account and yield the username. Login screen routes to signup/forgot.
+      home = LoginScreen(auth: widget.authService);
+    } else if (_token == null) {
       home = OnboardingScreen(
         identity: widget.identity,
         flow: AttestationFlow(config: BackendConfig.fromEnvironment),
         tokenStorage: widget.tokenStorage,
         onComplete: (token) => setState(() => _token = token),
       );
-    } else if (!_friendsReady) {
-      // Friend store still loading from secure storage (fast, one read).
-      home = const Scaffold(body: Center(child: CircularProgressIndicator()));
-    } else if (!_friends.hasAccount) {
-      // Friendship onboarding: pick a username after attestation, before the
-      // WiFi step. One-time; skipped on every later launch.
-      home = AccountScreen(
-        friends: _friends,
-        onDone: () => setState(() {}),
+    } else if (!_welcomeSeen) {
+      // One-time intro after the first verified login, before mesh setup.
+      home = WelcomeScreen(
+        username: _friends.store.ownUsername ?? '',
+        onContinue: _markWelcomeSeen,
       );
     } else if (!_wifiOffered) {
       home = WifiMeshToggleScreen(
@@ -202,21 +251,26 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
         onDone: () => setState(() => _wifiOffered = true),
       );
     } else {
-      home = ChatScreen(
+      home = FireflyHome(
         transport: _transport,
         pipeline: _pipeline,
         identity: widget.identity,
         friendService: _friends,
         attestationToken: _token!,
         batteryTier: _batteryTier,
+        readPosition: _readBeaconPosition,
         // Token expired mid-session: drop back to onboarding, which
-        // fetches and (on the fresh ChatScreen) re-presents a new one.
+        // fetches and (on the fresh home) re-presents a new one.
         onTokenExpired: () => setState(() => _token = null),
+        onLogout: widget.authService.logout,
       );
     }
     return MaterialApp(
-      title: 'MeshLink',
-      theme: ThemeData(colorSchemeSeed: Colors.indigo),
+      title: 'Firefly',
+      theme: ThemeData(
+        colorSchemeSeed: const Color(0xFFE6B34D),
+        fontFamily: 'Space Grotesk',
+      ),
       home: home,
       routes: {
         // Throwaway plugin PoC, kept reachable for debugging BLE issues.

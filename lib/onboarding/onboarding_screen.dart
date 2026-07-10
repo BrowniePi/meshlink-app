@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../debug/debug_log.dart' as dbg;
 import '../identity/device_identity.dart';
 import '../identity/token_storage.dart';
 import 'attestation_flow.dart';
@@ -49,12 +50,17 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       _status = _Status.working;
       _message = 'Getting your event pass…';
     });
+    dbg.DebugLog.instance.log('onboard', 'fetching event pass');
     try {
       final token = await widget.flow.fetchToken(_pubkeyHex());
       await widget.tokenStorage.write(token);
+      dbg.DebugLog.instance.log('onboard', 'event pass stored — onboarding done');
       if (!mounted) return;
       widget.onComplete(token);
     } on AttestationException catch (e) {
+      dbg.DebugLog.instance.log('onboard',
+          'onboarding failed (${e.message}), retryable=${e.retryable}',
+          level: dbg.LogLevel.error);
       if (!mounted) return;
       setState(() {
         _status = _Status.error;

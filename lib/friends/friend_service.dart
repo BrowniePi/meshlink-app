@@ -103,12 +103,24 @@ class FriendService extends ChangeNotifier {
 
   bool get hasAccount => store.ownUsername != null;
 
+  /// Direct directory registration (POST /account) — used by the test harness
+  /// and any directory-only path. The production flow goes through
+  /// /auth/signup instead and calls [bindAccount].
   Future<void> createAccount(String username) async {
     await directory.createAccount(
       username: username,
       curve25519Pub: encryption.publicKey,
       ed25519Pub: identity.publicKey,
     );
+    await store.setOwnUsername(username);
+    notifyListeners();
+  }
+
+  /// Record the account's mesh handle after auth. The directory row was
+  /// already created by POST /auth/signup, so this only sets the local
+  /// username — it must NOT re-POST /account (that would 409 on the taken
+  /// name). Login rebinds the device keys server-side.
+  Future<void> bindAccount(String username) async {
     await store.setOwnUsername(username);
     notifyListeners();
   }
@@ -249,7 +261,9 @@ class FriendService extends ChangeNotifier {
 
   /// Send [text] to a friend, sealed to their pinned X25519 key. Best-effort
   /// like all mesh traffic (spray-and-wait, no delivery receipt); the local
-  /// copy is appended to the conversation immediately.
+  /// copy is appended to the conversation immediately with [DmStatus.sending],
+  /// then flipped to [DmStatus.relayed] once at least one peer took the
+  /// packet ([DmStatus.failed] when no peer was reachable).
   Future<void> sendDirectMessage(String username, String text) async {
     final entry = store.byUsername(username);
     if (entry == null || entry.record.state != FriendshipState.friends) {
@@ -260,8 +274,12 @@ class FriendService extends ChangeNotifier {
       pubkeyId(entry.record.peerEd25519Pub),
       entry.record.peerCurve25519Pub,
     );
-    await _sendToPeers(msgTypeDirectMessage, payload);
-    entry.addMessage(DirectMessage(text: text, outgoing: true, at: _now()));
+    final message = DirectMessage(
+        text: text, outgoing: true, at: _now(), status: DmStatus.sending);
+    entry.addMessage(message);
+    notifyListeners();
+    final reached = await _sendToPeers(msgTypeDirectMessage, payload);
+    message.status = reached > 0 ? DmStatus.relayed : DmStatus.failed;
     await store.put(entry);
     notifyListeners();
   }
@@ -542,7 +560,8 @@ class FriendService extends ChangeNotifier {
     );
   }
 
-  Future<void> _sendToPeers(int msgType, Uint8List payload) async {
+  /// Returns how many peers actually took the packet (0 = not transmitted).
+  Future<int> _sendToPeers(int msgType, Uint8List payload) async {
     final packet = await buildSignedPacket(
       identity: identity,
       ephemId: _ephemId,
@@ -555,20 +574,23 @@ class FriendService extends ChangeNotifier {
     final result = await pipeline.process(packet);
     if (result.outcome != Outcome.deliver) {
       _log('not sent (own pipeline): ${result.dropReason}');
-      return;
+      return 0;
     }
     // Make sure the node has our attestation token before this packet — the
     // friend/location path can be the first thing we send through a node, and
     // step 7 drops us as unattested otherwise (a silent "location not
     // available"). No-op once presented, and null in tests.
     await presentAttestation?.call();
+    var reached = 0;
     for (final peer in transport.listPeers()) {
       try {
         await transport.send(peer, packet);
+        reached++;
       } catch (_) {
         // Peer vanished mid-send; dedup makes retries safe.
       }
     }
+    return reached;
   }
 
   Future<void> _mirror(FriendshipRecord record) async {

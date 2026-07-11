@@ -272,6 +272,22 @@ class AuthLink extends StatelessWidget {
   }
 }
 
+/// Accent progress spinner for in-card waiting states (attestation fetch,
+/// event list load) — the AuthButton busy spinner, card-sized.
+class AuthSpinner extends StatelessWidget {
+  const AuthSpinner({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = FireflyTheme.of(context);
+    return SizedBox(
+      width: 28,
+      height: 28,
+      child: CircularProgressIndicator(strokeWidth: 2.5, color: c.accent),
+    );
+  }
+}
+
 /// Glowing accent icon badge (verify / reset confirmation screens) — the
 /// accent-soft circle with the firefly-tail glow.
 class AuthBadge extends StatelessWidget {

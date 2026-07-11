@@ -20,15 +20,19 @@ import 'identity/encryption_identity.dart';
 import 'identity/secure_storage.dart';
 import 'identity/token_storage.dart';
 import 'onboarding/attestation_flow.dart';
+import 'onboarding/event_select_screen.dart';
+import 'onboarding/event_store.dart';
 import 'onboarding/onboarding_screen.dart';
 import 'onboarding/wifi_mesh_toggle.dart';
 import 'power/battery_tier_manager.dart';
 import 'telemetry/phone_ping_responder.dart';
+import 'transport/backend_proxy.dart';
 import 'transport/ble_transport.dart';
 import 'transport/failover_transport.dart';
 import 'transport/relay_service.dart';
 import 'transport/wifi_transport.dart';
 import 'ui/firefly/firefly_home.dart';
+import 'ui/firefly/firefly_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -49,11 +53,19 @@ Future<void> main() async {
   final validToken =
       (stored != null && !stored.isExpiredAt(DateTime.now())) ? stored : null;
 
+  // Backend-via-node: every backend client below shares this HTTP client,
+  // which tries the internet first and falls back to proxying through the
+  // connected mesh node (MLBP1 channel) when the phone has none. The channel
+  // binds to the transport when FailoverTransport is built in the app state.
+  final backendChannel = NodeBackendChannel();
+  final backendClient = MeshBackendClient(channel: backendChannel);
+
   // Account session (email + password auth), independent of the attestation
   // token and the device keypairs. Restored from secure storage if present;
   // the first gate is login when it isn't.
   final authService = AuthService(
-    client: AuthClient(config: BackendConfig.fromEnvironment),
+    client: AuthClient(config: BackendConfig.fromEnvironment,
+        client: backendClient),
     sessionStorage: SessionStorage(storage),
     identity: identity,
     encryption: encryption,
@@ -65,19 +77,55 @@ Future<void> main() async {
   // login. Persisted so returning users skip it.
   final welcomeSeen = await storage.read(_welcomeSeenKey) == 'true';
 
+  // Which event this install joined. Chosen once on the event-select screen
+  // (post-login, pre-attestation — the token is bound to it).
+  final eventStore = EventStore(storage);
+  final storedEvent = await eventStore.read();
+
   runApp(MeshLinkApp(
     identity: identity,
     encryption: encryption,
     storage: storage,
     tokenStorage: tokenStorage,
     authService: authService,
+    eventStore: eventStore,
+    backendChannel: backendChannel,
+    backendClient: backendClient,
     initialToken: validToken,
     initialWelcomeSeen: welcomeSeen,
+    initialEvent: storedEvent,
   ));
 }
 
 /// Secure-storage key marking that the post-first-login welcome intro ran.
 const String _welcomeSeenKey = 'meshlink_welcome_seen_v1';
+
+/// First frame while the friend store loads: the Firefly night gradient and
+/// an accent spinner instead of a bare Material scaffold, so launch doesn't
+/// flash a white screen before the glass chrome. Pre-login there is no user
+/// theme preference yet, so it follows the platform brightness (same rule
+/// as the auth screens).
+class _BootScreen extends StatelessWidget {
+  const _BootScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = MediaQuery.platformBrightnessOf(context) == Brightness.dark;
+    final c = dark ? FfColors.dark : FfColors.light;
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: Container(
+        decoration: BoxDecoration(gradient: c.bg),
+        alignment: Alignment.center,
+        child: SizedBox(
+          width: 28,
+          height: 28,
+          child: CircularProgressIndicator(strokeWidth: 2.5, color: c.accent),
+        ),
+      ),
+    );
+  }
+}
 
 class MeshLinkApp extends StatefulWidget {
   const MeshLinkApp({
@@ -87,8 +135,12 @@ class MeshLinkApp extends StatefulWidget {
     required this.storage,
     required this.tokenStorage,
     required this.authService,
+    required this.eventStore,
+    required this.backendChannel,
+    required this.backendClient,
     this.initialToken,
     this.initialWelcomeSeen = false,
+    this.initialEvent,
   });
 
   final DeviceIdentity identity;
@@ -96,8 +148,12 @@ class MeshLinkApp extends StatefulWidget {
   final SecureStorage storage;
   final TokenStorage tokenStorage;
   final AuthService authService;
+  final EventStore eventStore;
+  final NodeBackendChannel backendChannel;
+  final MeshBackendClient backendClient;
   final AttestationToken? initialToken;
   final bool initialWelcomeSeen;
+  final EventInfo? initialEvent;
 
   @override
   State<MeshLinkApp> createState() => _MeshLinkAppState();
@@ -106,15 +162,23 @@ class MeshLinkApp extends StatefulWidget {
 class _MeshLinkAppState extends State<MeshLinkApp> {
   AttestationToken? _token;
 
+  /// The event this install joined; null until chosen on the event-select
+  /// gate. The attestation token is bound to it.
+  EventInfo? _event;
+
   /// Phase 6: BLE always-on with WiFi as an opt-in second transport. Built
   /// once — the WiFi toggle state must survive token refreshes and screen
   /// swaps, and the pipeline sees it as the one Transport it always had.
-  final FailoverTransport _transport = FailoverTransport(
+  /// Late: it binds the backend-via-node channel from the widget.
+  late final FailoverTransport _transport = FailoverTransport(
     ble: BleTransport(),
     wifi: WifiTransport(config: WifiConfig.fromEnvironment),
     // Phase 7: answer the node's 2-minute telemetry pings (location +
     // battery) on whichever transport they arrive on.
     phonePing: PhonePingResponder(),
+    // Backend-via-node: MLBP1 replies demux to the channel the shared
+    // MeshBackendClient falls back to when the internet is unreachable.
+    backendProxy: widget.backendChannel,
   );
 
   /// Phase 7 four-tier battery management: polls every 60 s and throttles
@@ -142,6 +206,8 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
   @override
   void initState() {
     super.initState();
+    _token = widget.initialToken;
+    _event = widget.initialEvent;
     _wifiOffered = widget.initialToken != null;
     _welcomeSeen = widget.initialWelcomeSeen;
     _batteryTier.tier.addListener(_onTierChanged);
@@ -149,7 +215,8 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
 
     _friends = FriendService(
       store: FriendStore(widget.storage),
-      directory: DirectoryClient(config: BackendConfig.fromEnvironment),
+      directory: DirectoryClient(config: BackendConfig.fromEnvironment,
+          client: widget.backendClient),
       identity: widget.identity,
       encryption: widget.encryption,
       transport: _transport,
@@ -171,6 +238,21 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
   Future<void> _markWelcomeSeen() async {
     await widget.storage.write(_welcomeSeenKey, 'true');
     if (mounted) setState(() => _welcomeSeen = true);
+  }
+
+  /// Event chosen on the select gate. Any token held so far was fetched for
+  /// the previously effective event (the stored one, or the compile-time
+  /// default on legacy installs), so switching events invalidates it and
+  /// routes back through onboarding for a token bound to the new event.
+  Future<void> _selectEvent(EventInfo event) async {
+    final previousId =
+        _event?.eventId ?? BackendConfig.fromEnvironment.eventId;
+    await widget.eventStore.write(event);
+    if (event.eventId != previousId) {
+      await widget.tokenStorage.clear();
+      _token = null;
+    }
+    if (mounted) setState(() => _event = event);
   }
 
   /// Position source for the friend-location beacon. Same permission-aware
@@ -227,15 +309,33 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
     final Widget home;
     if (!_friendsReady) {
       // Friend store still loading from secure storage (fast, one read).
-      home = const Scaffold(body: Center(child: CircularProgressIndicator()));
+      home = const _BootScreen();
     } else if (!widget.authService.isLoggedIn) {
       // Account gate: login runs first so the device's keypairs bind to the
       // account and yield the username. Login screen routes to signup/forgot.
       home = LoginScreen(auth: widget.authService);
+    } else if (_event == null) {
+      // Event gate: the attestation token below is bound to an event id, so
+      // the choice must land before the fetch.
+      home = EventSelectScreen(
+        events: EventsClient(config: BackendConfig.fromEnvironment,
+            client: widget.backendClient),
+        defaultEvent: EventInfo(
+          eventId: BackendConfig.fromEnvironment.eventId,
+          name: BackendConfig.fromEnvironment.eventId,
+        ),
+        onSelected: (event) => unawaited(_selectEvent(event)),
+      );
     } else if (_token == null) {
       home = OnboardingScreen(
         identity: widget.identity,
-        flow: AttestationFlow(config: BackendConfig.fromEnvironment),
+        flow: AttestationFlow(
+          config: BackendConfig(
+            baseUrl: BackendConfig.fromEnvironment.baseUrl,
+            eventId: _event!.eventId,
+          ),
+          client: widget.backendClient,
+        ),
         tokenStorage: widget.tokenStorage,
         onComplete: (token) => setState(() => _token = token),
       );

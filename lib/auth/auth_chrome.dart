@@ -14,6 +14,15 @@ import '../ui/firefly/glass.dart';
 /// Failure text color — matches the failed-DM tick in the chat panel.
 const Color authErrorColor = Color(0xFFFF8A80);
 
+/// TEMPORARY — the backend sleeps on Render's free plan and takes ~50s to boot
+/// on the first request, which login/signup usually is. MeshBackendClient's
+/// authTimeout allows for that wait; this tells the user why it is happening
+/// rather than leaving them on a silent spinner for a minute. Remove both once
+/// the backend is on an always-on plan.
+const Duration authWakingAfter = Duration(seconds: 8);
+const String authWakingMessage =
+    'Waking the server — this can take up to a minute.';
+
 class AuthScaffold extends StatelessWidget {
   const AuthScaffold({
     super.key,

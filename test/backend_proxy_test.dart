@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -195,6 +196,56 @@ void main() {
       final res = await client.post(Uri.parse('http://backend/attestation/token'));
       expect(res.statusCode, 403);
       expect(res.body, '{"detail":"ticket expired"}');
+    });
+
+    test('an auth call with no node waits out a cold start; other calls do not',
+        () async {
+      final transport = FakeNodeTransport(peers: []);
+      final channel = attachedChannel(transport);
+      // A backend still booting: slower than the normal cap, quicker than the
+      // cold-start one.
+      final client = MeshBackendClient(
+        channel: channel,
+        direct: MockClient((req) async {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+          return http.Response('{"ok":1}', 200);
+        }),
+        directTimeout: const Duration(milliseconds: 20),
+        authTimeout: const Duration(milliseconds: 400),
+      );
+
+      final res = await client.post(Uri.parse('http://backend/auth/login'));
+      expect(res.statusCode, 200, reason: 'waited for the server to wake');
+
+      expect(client.get(Uri.parse('http://backend/events')),
+          throwsA(isA<TimeoutException>()),
+          reason: 'only /auth/ gets the longer budget');
+    });
+
+    test('a connected node still gets the short cap on auth calls', () async {
+      final transport = FakeNodeTransport();
+      final channel = attachedChannel(transport);
+      transport.responder = (req) => {
+            't': 'res',
+            'id': req['id'],
+            'status': 200,
+            'body': '{"proxied":1}',
+          };
+      final client = MeshBackendClient(
+        channel: channel,
+        direct: MockClient((req) async {
+          await Future<void>.delayed(const Duration(milliseconds: 400));
+          return http.Response('{"direct":1}', 200);
+        }),
+        directTimeout: const Duration(milliseconds: 20),
+        authTimeout: const Duration(seconds: 30),
+      );
+
+      // The cold-start budget must not delay the mesh fallback: with a node
+      // there, the direct attempt is still capped at directTimeout.
+      final res = await client.post(Uri.parse('http://backend/auth/login'));
+      expect(res.body, '{"proxied":1}');
+      expect(transport.requests.single.$2['path'], '/auth/login');
     });
 
     test('rethrows the direct failure when no mesh peer is connected',

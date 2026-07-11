@@ -7,6 +7,7 @@ import 'package:meshlink_app/auth/auth_service.dart';
 import 'package:meshlink_app/auth/login_screen.dart';
 import 'package:meshlink_app/auth/session_storage.dart';
 import 'package:meshlink_app/auth/signup_screen.dart';
+import 'package:meshlink_app/auth/verify_pending_screen.dart';
 import 'package:meshlink_app/auth/welcome_screen.dart';
 import 'package:meshlink_app/config/backend_config.dart';
 import 'package:meshlink_app/identity/device_identity.dart';
@@ -55,6 +56,28 @@ void main() {
     expect(find.text('Create account'), findsOneWidget);
     expect(find.byType(TextField), findsNWidgets(3));
     expect(find.text('Sign up'), findsOneWidget);
+  });
+
+  testWidgets('login keeps no back button after a pushed screen pops',
+      (tester) async {
+    final auth = await _auth();
+    await tester.pumpWidget(MaterialApp(home: LoginScreen(auth: auth)));
+    final nav = tester.state<NavigatorState>(find.byType(Navigator));
+    nav.push(MaterialPageRoute(
+        builder: (_) => VerifyPendingScreen(
+            auth: auth, email: 'a@b.c', password: 'pw')));
+    await tester.pumpAndSettle();
+
+    // Rebuild the login route while it sits under the pushed one — this is
+    // where a navigator-wide canPop check would latch a back button on.
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+    await tester.pumpAndSettle();
+
+    nav.pop();
+    await tester.pumpAndSettle();
+    expect(find.text('Log in'), findsNWidgets(2));
+    expect(find.byIcon(Icons.arrow_back_rounded), findsNothing);
   });
 
   testWidgets('welcome screen greets by username', (tester) async {

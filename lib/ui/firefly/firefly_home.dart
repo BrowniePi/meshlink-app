@@ -123,7 +123,7 @@ class _FireflyHomeState extends State<FireflyHome>
   void _wakeMap() {
     if (!_interacting) setState(() => _interacting = true);
     _uiTimer?.cancel();
-    _uiTimer = Timer(const Duration(milliseconds: 1700), () {
+    _uiTimer = Timer(const Duration(milliseconds: 700), () {
       if (mounted) setState(() => _interacting = false);
     });
   }

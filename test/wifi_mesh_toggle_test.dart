@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:meshlink_app/auth/auth_chrome.dart';
 import 'package:meshlink_app/config/wifi_config.dart';
 import 'package:meshlink_app/onboarding/wifi_mesh_toggle.dart';
 import 'package:meshlink_app/transport/failover_transport.dart';
@@ -98,7 +99,7 @@ void main() {
     await tester.runAsync(() async {
       await tester.tap(find.text('Connect'));
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, 'Connect').last);
+      await tester.tap(find.widgetWithText(AuthButton, 'Connect').last);
       await Future<void>.delayed(const Duration(milliseconds: 100));
     });
     await tester.pumpAndSettle();

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'auth_chrome.dart';
@@ -24,12 +26,20 @@ class _LoginScreenState extends State<LoginScreen> {
   final TextEditingController _password = TextEditingController();
   String? _error;
   bool _busy = false;
+  bool _waking = false;
+  Timer? _wakingTimer;
 
   @override
   void dispose() {
+    _wakingTimer?.cancel();
     _email.dispose();
     _password.dispose();
     super.dispose();
+  }
+
+  void _stopWaking() {
+    _wakingTimer?.cancel();
+    _waking = false;
   }
 
   Future<void> _submit() async {
@@ -39,12 +49,19 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() {
       _busy = true;
       _error = null;
+      _waking = false;
+    });
+    _wakingTimer?.cancel();
+    _wakingTimer = Timer(authWakingAfter, () {
+      if (mounted) setState(() => _waking = true);
     });
     try {
       await widget.auth.login(email: email, password: password);
+      _stopWaking();
       // Success: AuthService notified; the root gate rebuilds to onboarding.
       if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
     } on AuthException catch (e) {
+      _stopWaking();
       if (!mounted) return;
       if (e.unverified) {
         // Email still unverified — send them to the pending screen to finish.
@@ -88,7 +105,10 @@ class _LoginScreenState extends State<LoginScreen> {
           autofillHints: const [AutofillHints.password],
           onSubmitted: (_) => _submit(),
         ),
-        if (_error != null) AuthNotice(text: _error!, error: true),
+        if (_error != null)
+          AuthNotice(text: _error!, error: true)
+        else if (_waking)
+          const AuthNotice(text: authWakingMessage),
         const SizedBox(height: 18),
         AuthButton(label: 'Log in', busy: _busy, onTap: _submit),
         const SizedBox(height: 10),

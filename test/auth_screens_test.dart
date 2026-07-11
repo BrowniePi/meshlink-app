@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/testing.dart';
 import 'package:http/http.dart' as http;
+import 'package:meshlink_app/auth/auth_chrome.dart';
 import 'package:meshlink_app/auth/auth_client.dart';
 import 'package:meshlink_app/auth/auth_service.dart';
 import 'package:meshlink_app/auth/login_screen.dart';
@@ -28,12 +29,15 @@ class _FakeStorage implements SecureStorage {
   Future<void> delete(String key) async => _m.remove(key);
 }
 
-Future<AuthService> _auth() async {
+Future<AuthService> _auth({Duration backendDelay = Duration.zero}) async {
   final storage = _FakeStorage();
   return AuthService(
     client: AuthClient(
         config: const BackendConfig(baseUrl: 'http://test', eventId: 'e'),
-        client: MockClient((_) async => http.Response('{}', 500))),
+        client: MockClient((_) async {
+          await Future<void>.delayed(backendDelay);
+          return http.Response('{}', 500);
+        })),
     sessionStorage: SessionStorage(storage),
     identity: await DeviceIdentity.loadOrGenerate(storage),
     encryption: await EncryptionIdentity.loadOrGenerate(storage),
@@ -78,6 +82,27 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Log in'), findsNWidgets(2));
     expect(find.byIcon(Icons.arrow_back_rounded), findsNothing);
+  });
+
+  testWidgets('a slow login says the server is waking, not that it failed',
+      (tester) async {
+    final auth = await _auth(backendDelay: const Duration(seconds: 30));
+    await tester.pumpWidget(MaterialApp(home: LoginScreen(auth: auth)));
+    await tester.enterText(find.byType(TextField).first, 'ada@example.com');
+    await tester.enterText(find.byType(TextField).last, 'password123');
+    await tester.tap(find.text('Log in').last);
+
+    await tester.pump(const Duration(seconds: 5));
+    expect(find.text(authWakingMessage), findsNothing,
+        reason: 'a healthy backend answers well inside this');
+
+    await tester.pump(authWakingAfter);
+    expect(find.text(authWakingMessage), findsOneWidget);
+
+    // Server finally answers (500 here) — the notice gives way to the error.
+    await tester.pump(const Duration(seconds: 30));
+    await tester.pumpAndSettle();
+    expect(find.text(authWakingMessage), findsNothing);
   });
 
   testWidgets('welcome screen greets by username', (tester) async {

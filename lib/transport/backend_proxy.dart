@@ -148,6 +148,7 @@ class MeshBackendClient extends http.BaseClient {
     required this.channel,
     http.Client? direct,
     this.directTimeout = const Duration(seconds: 8),
+    this.authTimeout = const Duration(seconds: 75),
   }) : _direct = direct ?? http.Client();
 
   final NodeBackendChannel channel;
@@ -156,6 +157,23 @@ class MeshBackendClient extends http.BaseClient {
   /// Cap on the direct attempt so the mesh fallback still fits within the
   /// callers' own request timeouts.
   final Duration directTimeout;
+
+  /// TEMPORARY — the backend is on a Render free plan, which suspends the
+  /// service when idle and takes ~50s to boot on the next request. Logging in
+  /// or signing up is usually that first request, so the normal cap reports
+  /// "Backend unreachable" while the server is merely waking. Drop this back
+  /// to [directTimeout] once the backend is on an always-on plan.
+  final Duration authTimeout;
+
+  /// [directTimeout] exists only so a failed direct attempt still leaves room
+  /// for the mesh fallback, so it applies whenever that fallback is actually
+  /// there. With no node connected there is nothing to fall back to and
+  /// nothing the short cap buys — so an auth call may wait out a cold start
+  /// instead of failing at 8s.
+  Duration _timeoutFor(Uri url) =>
+      url.path.startsWith('/auth/') && !channel.available
+          ? authTimeout
+          : directTimeout;
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
@@ -167,7 +185,7 @@ class MeshBackendClient extends http.BaseClient {
     try {
       return await _direct
           .send(_rebuild(request, bodyBytes))
-          .timeout(directTimeout);
+          .timeout(_timeoutFor(request.url));
     } on Exception catch (e) {
       if (!channel.available) rethrow;
       dbg.DebugLog.instance

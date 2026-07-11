@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -24,13 +26,21 @@ class _SignupScreenState extends State<SignupScreen> {
   final TextEditingController _password = TextEditingController();
   String? _error;
   bool _busy = false;
+  bool _waking = false;
+  Timer? _wakingTimer;
 
   @override
   void dispose() {
+    _wakingTimer?.cancel();
     _email.dispose();
     _username.dispose();
     _password.dispose();
     super.dispose();
+  }
+
+  void _stopWaking() {
+    _wakingTimer?.cancel();
+    _waking = false;
   }
 
   Future<void> _submit() async {
@@ -45,16 +55,23 @@ class _SignupScreenState extends State<SignupScreen> {
     setState(() {
       _busy = true;
       _error = null;
+      _waking = false;
+    });
+    _wakingTimer?.cancel();
+    _wakingTimer = Timer(authWakingAfter, () {
+      if (mounted) setState(() => _waking = true);
     });
     try {
       await widget.auth
           .signup(email: email, username: username, password: password);
+      _stopWaking();
       if (!mounted) return;
       Navigator.of(context).pushReplacement(MaterialPageRoute(
         builder: (_) => VerifyPendingScreen(
             auth: widget.auth, email: email, password: password),
       ));
     } on AuthException catch (e) {
+      _stopWaking();
       if (mounted) {
         setState(() {
           _busy = false;
@@ -105,7 +122,10 @@ class _SignupScreenState extends State<SignupScreen> {
           autofillHints: const [AutofillHints.newPassword],
           onSubmitted: (_) => _submit(),
         ),
-        if (_error != null) AuthNotice(text: _error!, error: true),
+        if (_error != null)
+          AuthNotice(text: _error!, error: true)
+        else if (_waking)
+          const AuthNotice(text: authWakingMessage),
         const SizedBox(height: 18),
         AuthButton(label: 'Sign up', busy: _busy, onTap: _submit),
       ],

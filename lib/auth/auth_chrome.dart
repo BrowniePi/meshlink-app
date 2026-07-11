@@ -41,7 +41,11 @@ class AuthScaffold extends StatelessWidget {
       colors: dark ? FfColors.dark : FfColors.light,
       child: Builder(builder: (context) {
         final c = FireflyTheme.of(context);
-        final canPop = Navigator.of(context).canPop();
+        // Route-scoped, not Navigator.canPop(): the latter is true whenever
+        // *any* route sits above the first one, so login (still mounted under
+        // a pushed screen) would rebuild with a back button it keeps after
+        // that screen pops.
+        final canPop = ModalRoute.of(context)?.canPop ?? false;
         return Scaffold(
           backgroundColor: Colors.transparent,
           body: Container(

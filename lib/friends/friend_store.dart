@@ -4,13 +4,26 @@ import 'dart:typed_data';
 import '../identity/secure_storage.dart';
 import 'friend_state.dart';
 
+/// Delivery progress of an outgoing DM. The mesh is best-effort
+/// spray-and-wait with no receipts, so the honest ceiling is [relayed]:
+/// the packet was handed to at least one peer. There is no "delivered".
+enum DmStatus { sending, relayed, failed }
+
 /// One direct message in a conversation, as this phone saw it. DMs live on
 /// the phones only — they never touch the backend or the node's storage.
 class DirectMessage {
-  DirectMessage({required this.text, required this.outgoing, required this.at});
+  DirectMessage({
+    required this.text,
+    required this.outgoing,
+    required this.at,
+    this.status,
+  });
   final String text;
   final bool outgoing;
   final DateTime at;
+
+  /// Only meaningful for outgoing messages; null for incoming.
+  DmStatus? status;
 }
 
 /// Newest messages kept per friend — bounds the secure-storage blob.
@@ -100,6 +113,9 @@ class FriendStore {
               text: d['text'] as String,
               outgoing: d['out'] as bool,
               at: DateTime.fromMillisecondsSinceEpoch((d['at'] as num).toInt()),
+              status: d['status'] == null
+                  ? null
+                  : DmStatus.values.byName(d['status'] as String),
             ),
         ],
       );
@@ -135,7 +151,12 @@ class FriendStore {
               : _hex(e.pendingRequestMsgId!),
           'messages': [
             for (final d in e.messages)
-              {'text': d.text, 'out': d.outgoing, 'at': d.at.millisecondsSinceEpoch}
+              {
+                'text': d.text,
+                'out': d.outgoing,
+                'at': d.at.millisecondsSinceEpoch,
+                'status': d.status?.name,
+              }
           ],
         }
     ];

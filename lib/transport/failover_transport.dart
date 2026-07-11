@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../debug/debug_log.dart' as dbg;
 import '../power/battery_tier_manager.dart';
 import '../telemetry/phone_ping_responder.dart';
+import 'backend_proxy.dart';
 import 'ble_transport.dart';
 import 'transport.dart';
 import 'wifi_transport.dart';
@@ -25,7 +26,10 @@ import 'wifi_transport.dart';
 /// and stop the WiFi side. Disabling reverts to exactly the BLE-only
 /// behavior — same pipeline, same routing, no other side effects.
 class FailoverTransport implements Transport {
-  FailoverTransport({required this.ble, required this.wifi, this.phonePing});
+  FailoverTransport(
+      {required this.ble, required this.wifi, this.phonePing, this.backendProxy}) {
+    backendProxy?.attach(this);
+  }
 
   final Transport ble;
   final WifiTransport wifi;
@@ -35,6 +39,10 @@ class FailoverTransport implements Transport {
   /// still demuxed away from the pipeline (they aren't signed packets) and
   /// dropped.
   final PhonePingResponder? phonePing;
+
+  /// Backend-via-node channel: `MLBP1` reply frames are demuxed to it the
+  /// same way telemetry pings are. Optional for plain-transport tests.
+  final NodeBackendChannel? backendProxy;
 
   /// True while Ticket-only tier has both radios down (see [applyTier]).
   bool _suspended = false;
@@ -85,6 +93,10 @@ class FailoverTransport implements Transport {
         if (responder != null) {
           unawaited(responder.handle(peerId, data, send));
         }
+        return;
+      }
+      if (isBackendProxyFrame(data)) {
+        backendProxy?.handleFrame(peerId, data);
         return;
       }
       callback(peerId, data);

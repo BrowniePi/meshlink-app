@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../config/backend_config.dart';
+import '../debug/debug_log.dart' as dbg;
 import '../identity/token_storage.dart';
 
 /// Raised when the attestation fetch cannot complete. [retryable] is true for
@@ -41,20 +42,30 @@ class AttestationFlow {
   /// key). Purchases a ticket, exchanges it for a token, and returns both the
   /// token and its expiry. Throws [AttestationException] on failure.
   Future<AttestationToken> fetchToken(String devicePubkeyHex) async {
+    dbg.DebugLog.instance.log('attest',
+        'fetchToken: event=${config.eventId} device=${_short(devicePubkeyHex)}');
     final ticketId = await _retry(() => _createTicket(devicePubkeyHex));
-    return _retry(() => _requestToken(ticketId, devicePubkeyHex));
+    final token = await _retry(() => _requestToken(ticketId, devicePubkeyHex));
+    dbg.DebugLog.instance.log('attest',
+        'token acquired (expires ${token.expiresAt.toIso8601String()})');
+    return token;
   }
 
   Future<String> _createTicket(String buyerPubkey) async {
+    dbg.DebugLog.instance.log('attest', 'POST /tickets');
     final response = await _post('/tickets', {
       'event_id': config.eventId,
       'buyer_pubkey': buyerPubkey,
     });
-    return _decode(response)['ticket_id'] as String;
+    final ticketId = _decode(response)['ticket_id'] as String;
+    dbg.DebugLog.instance.log('attest', 'ticket created: $ticketId');
+    return ticketId;
   }
 
   Future<AttestationToken> _requestToken(
       String ticketId, String devicePubkey) async {
+    dbg.DebugLog.instance
+        .log('attest', 'POST /attestation/token (ticket $ticketId)');
     final response = await _post('/attestation/token', {
       'ticket_id': ticketId,
       'event_id': config.eventId,
@@ -68,6 +79,9 @@ class AttestationFlow {
       ),
     );
   }
+
+  static String _short(String hex) =>
+      hex.length <= 12 ? hex : '${hex.substring(0, 12)}…';
 
   Future<http.Response> _post(String path, Map<String, dynamic> body) async {
     final http.Response response;
@@ -91,10 +105,10 @@ class AttestationFlow {
     final code = response.statusCode;
     if (code >= 200 && code < 300) return response;
     // 4xx are definitive (bad/expired ticket, wrong event); 5xx are transient.
-    throw AttestationException(
-      _errorReason(response) ?? 'Backend error ($code)',
-      retryable: code >= 500,
-    );
+    final reason = _errorReason(response) ?? 'Backend error ($code)';
+    dbg.DebugLog.instance.log('attest', 'POST $path -> $code: $reason',
+        level: dbg.LogLevel.error);
+    throw AttestationException(reason, retryable: code >= 500);
   }
 
   Map<String, dynamic> _decode(http.Response r) =>
@@ -116,6 +130,9 @@ class AttestationFlow {
         return await action();
       } on AttestationException catch (e) {
         if (!e.retryable || attempt >= maxAttempts) rethrow;
+        dbg.DebugLog.instance.log('attest',
+            'attempt $attempt/$maxAttempts failed (${e.message}) — backing off',
+            level: dbg.LogLevel.warn);
         await Future<void>.delayed(baseBackoff * (1 << (attempt - 1)));
       }
     }

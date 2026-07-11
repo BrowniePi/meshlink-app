@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../auth/auth_chrome.dart';
+import '../debug/debug_log.dart' as dbg;
 import '../identity/device_identity.dart';
 import '../identity/token_storage.dart';
 import 'attestation_flow.dart';
@@ -49,12 +51,17 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       _status = _Status.working;
       _message = 'Getting your event pass…';
     });
+    dbg.DebugLog.instance.log('onboard', 'fetching event pass');
     try {
       final token = await widget.flow.fetchToken(_pubkeyHex());
       await widget.tokenStorage.write(token);
+      dbg.DebugLog.instance.log('onboard', 'event pass stored — onboarding done');
       if (!mounted) return;
       widget.onComplete(token);
     } on AttestationException catch (e) {
+      dbg.DebugLog.instance.log('onboard',
+          'onboarding failed (${e.message}), retryable=${e.retryable}',
+          level: dbg.LogLevel.error);
       if (!mounted) return;
       setState(() {
         _status = _Status.error;
@@ -66,45 +73,32 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: switch (_status) {
-            _Status.working => Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const CircularProgressIndicator(),
-                  const SizedBox(height: 24),
-                  Text(_message, textAlign: TextAlign.center),
-                ],
-              ),
-            _Status.error => Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    _retryable ? Icons.wifi_off : Icons.event_busy,
-                    size: 48,
-                    color: Theme.of(context).colorScheme.error,
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    _retryable ? 'Couldn\'t get your pass' : 'Event unavailable',
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(_message, textAlign: TextAlign.center),
-                  const SizedBox(height: 24),
-                  if (_retryable)
-                    FilledButton(
-                      onPressed: _run,
-                      child: const Text('Try again'),
-                    ),
-                ],
-              ),
-          },
-        ),
-      ),
+    return AuthScaffold(
+      title: switch (_status) {
+        _Status.working => 'Event pass',
+        _Status.error =>
+          _retryable ? 'Couldn\'t get your pass' : 'Event unavailable',
+      },
+      subtitle: 'Off-grid messaging for events',
+      children: switch (_status) {
+        _Status.working => [
+            const Center(child: AuthSpinner()),
+            const SizedBox(height: 18),
+            AuthBody(text: _message, center: true),
+          ],
+        _Status.error => [
+            Center(
+              child: AuthBadge(
+                  icon: _retryable ? Icons.wifi_off : Icons.event_busy),
+            ),
+            const SizedBox(height: 18),
+            AuthBody(text: _message, center: true),
+            if (_retryable) ...[
+              const SizedBox(height: 20),
+              AuthButton(label: 'Try again', onTap: _run),
+            ],
+          ],
+      },
     );
   }
 }

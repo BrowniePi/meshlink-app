@@ -10,6 +10,7 @@ import '../core/message_factory.dart';
 import '../core/pipeline.dart';
 import '../debug/debug_log.dart' as dbg;
 import '../friends/friend_service.dart';
+import '../transport/spray_relay.dart';
 import '../identity/device_identity.dart';
 import '../identity/token_storage.dart';
 import '../onboarding/wifi_mesh_toggle.dart';
@@ -229,6 +230,15 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     if (result.outcome == Outcome.deliver) {
+      // Spray-and-Wait: pass the pipeline's onward copy to our other peers
+      // (battery-tier gated). Runs before local handling so relaying never
+      // waits on UI work.
+      unawaited(sprayRelay(
+        transport: widget.transport,
+        fromPeer: peerId,
+        result: result,
+        batteryTier: widget.batteryTier,
+      ));
       // Friendship/location traffic rides the same pipeline as chat; offer
       // every delivered non-TEXT message to the friend service, which
       // consumes what's addressed to us (and ignores the rest — already

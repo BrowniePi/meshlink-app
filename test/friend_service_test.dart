@@ -1,7 +1,11 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:meshlink_app/core/friend_wire.dart';
+import 'package:meshlink_app/core/message.dart';
 import 'package:meshlink_app/core/message_factory.dart';
+import 'package:meshlink_app/core/pipeline.dart';
 import 'package:meshlink_app/friends/directory_client.dart';
 import 'package:meshlink_app/friends/friend_state.dart';
 import 'package:meshlink_app/friends/friend_store.dart';
@@ -199,6 +203,72 @@ void main() {
     expect(carol.transport.sent.map((p) => p[72]),
         contains(msgTypeLocationQuery));
   }, timeout: const Timeout(Duration(minutes: 1)));
+
+  test('flow 4 revamp: the target phone answers a sprayed query — no node',
+      () async {
+    await befriend(bobSharesAtAccept: true);
+    bob.position = (lat: 37.7749, lon: -122.4194, accuracyM: 8.0);
+
+    bob.transport.drain();
+    final pending = alice.friends.queryFriendLocation('bob');
+    await pumpEventQueue();
+    await alice.deliverTo(bob); // the query sprays to bob's phone
+    await bob.deliverTo(alice); // bob's live answer comes back
+
+    final result = await pending;
+    expect(result, isNotNull);
+    expect(result!.latMicrodeg, 37774900);
+    expect(result.lonMicrodeg, -122419400);
+    expect(result.accuracyM, 8);
+    expect(result.beaconAgeS, 0, reason: 'a live fix, not a cached beacon');
+    // The answer also lands in the freshest-wins cache for the map.
+    expect(alice.friends.lastKnownLocation['bob'], isNotNull);
+  });
+
+  test('flow 4 revamp: sharing switched off refuses even a live token',
+      () async {
+    await befriend(bobSharesAtAccept: true);
+    bob.position = (lat: 37.7749, lon: -122.4194, accuracyM: 8.0);
+
+    // Bob turns sharing off but the LOCATION_REVOKE is lost in transit —
+    // alice still holds an unexpired token. Consent lives in bob's local
+    // switch, so his phone must refuse anyway, silently.
+    await bob.friends.disableLocationSharing('alice');
+    bob.transport.drain();
+
+    unawaited(alice.friends.queryFriendLocation('bob'));
+    await pumpEventQueue();
+    await alice.deliverTo(bob);
+    expect(bob.transport.sent, isEmpty,
+        reason: 'refusal is a silent non-answer');
+  });
+
+  test('flow 4 revamp: a stolen token is useless without the grantee key',
+      () async {
+    await befriend(bobSharesAtAccept: true);
+    bob.position = (lat: 37.7749, lon: -122.4194, accuracyM: 8.0);
+
+    // Mallory relays alice↔bob traffic and has captured alice's token, but
+    // her envelope is signed with HER key — not the token's grantee.
+    final mallory = await FakePhone.create(registry);
+    addTearDown(mallory.friends.dispose);
+    await mallory.friends.createAccount('mallory');
+    final stolen = alice.friends.store.byUsername('bob')!.theirTokenToMe!;
+    final packet = await buildSignedPacket(
+      identity: mallory.friends.identity,
+      ephemId: Uint8List.fromList(List.filled(16, 7)),
+      payload: encodeLocationQuery(stolen),
+      msgType: msgTypeLocationQuery,
+      zoneId: broadcastZone,
+    );
+
+    bob.transport.drain();
+    final result = await bob.pipeline.process(packet);
+    expect(result.outcome, Outcome.deliver);
+    await bob.friends.handleMessage(result.message!);
+    expect(bob.transport.sent, isEmpty,
+        reason: 'stolen-token refusal is indistinguishable from silence');
+  });
 
   test('flow 5: DMs deliver both ways and the history survives a restart',
       () async {

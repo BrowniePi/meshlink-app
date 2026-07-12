@@ -73,6 +73,7 @@ def main() -> None:
 
     location_response = encode_location_response(
         LocationResponsePayload(
+            target_pubkey_id=bytes.fromhex("b1b2b3b4b5b6b7b8"),
             lat_microdeg=37774900,
             lon_microdeg=-122419400,
             accuracy_m=12,
@@ -116,6 +117,7 @@ def main() -> None:
         },
         "location_response": {
             "requester_x25519_seed_hex": RECIPIENT_X_SEED.hex(),
+            "target_pubkey_id_hex": "b1b2b3b4b5b6b7b8",
             "lat_microdeg": 37774900,
             "lon_microdeg": -122419400,
             "accuracy_m": 12,

@@ -6,8 +6,14 @@ import 'message.dart';
 import 'rate_limit_check.dart';
 import 'signature_check.dart';
 import 'size_check.dart';
+import 'spray_and_wait.dart';
 import 'timestamp_check.dart';
 import 'ttl_check.dart';
+
+/// ttl / spray_L byte offsets in the fixed header (docs/message-format.md
+/// §2). Both sit outside the signed region, so a relay may rewrite them.
+const int _ttlOffset = 68;
+const int _sprayOffset = 69;
 
 enum Outcome {
   deliver('deliver'),
@@ -19,11 +25,18 @@ enum Outcome {
 }
 
 class PipelineResult {
-  PipelineResult(this.outcome, {this.dropReason, this.message});
+  PipelineResult(this.outcome, {this.dropReason, this.message, this.forward});
 
   final Outcome outcome;
   final String? dropReason;
   final Message? message;
+
+  /// The onward copy of an accepted packet: ttl decremented, spray_L
+  /// binary-split to the peer's share (Spray-and-Wait). Null when the hop
+  /// budget or the copy budget is exhausted — deliver locally, spray no
+  /// further. A broadcast packet is both delivered AND forwarded, which the
+  /// single-valued outcome enum cannot express; hence a separate field.
+  final Uint8List? forward;
 }
 
 int _wallClockSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -50,6 +63,7 @@ class RelayPipeline {
   final bool verifySignatures;
   late final DedupCache _dedup;
   late final RateLimiter _rateLimiter;
+  final SprayBudgetTracker _sprayBudget = SprayBudgetTracker();
 
   Future<PipelineResult> process(Uint8List raw) async {
     // Step 1 — size (pre-parse, one comparison)
@@ -104,7 +118,29 @@ class RelayPipeline {
       return PipelineResult(Outcome.drop, dropReason: attReason);
     }
 
-    // Step 8 — deliver or relay (stub: always deliver at Phase 1)
-    return PipelineResult(Outcome.deliver, message: msg);
+    // Step 8 — deliver, and compute the onward Spray-and-Wait copy.
+    // Budget contract first: a relay must never present a spray_L higher
+    // than this device first observed for the msg_id (backstops dedup
+    // eviction against budget inflation).
+    final budgetReason = _sprayBudget.check(msg.msgId, msg.sprayL);
+    if (budgetReason != null) {
+      return PipelineResult(Outcome.drop, dropReason: budgetReason);
+    }
+    return PipelineResult(Outcome.deliver,
+        message: msg, forward: _onwardCopy(raw, msg));
   }
+}
+
+/// The packet to hand peers: ttl-1, spray_L = the peer's binary-split share.
+/// Null once either budget is spent — the message enters the Wait phase
+/// (deliver only, no further spraying). Rewriting these two bytes is
+/// signature-safe: both sit outside signedRegion.
+Uint8List? _onwardCopy(Uint8List raw, Message msg) {
+  final nextTtl = msg.ttl - 1;
+  final forwardL = splitCopies(msg.sprayL).forward;
+  if (nextTtl <= 0 || forwardL == 0) return null;
+  final out = Uint8List.fromList(raw);
+  out[_ttlOffset] = nextTtl;
+  out[_sprayOffset] = forwardL;
+  return out;
 }

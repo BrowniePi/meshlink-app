@@ -100,6 +100,7 @@ void main() {
         .newKeyPairFromSeed(_fromHex(v['requester_x25519_seed_hex'] as String));
     final decoded = await decodeLocationResponse(
         _fromHex(v['payload_hex'] as String), requester);
+    expect(decoded.targetPubkeyId, _fromHex(v['target_pubkey_id_hex'] as String));
     expect(decoded.latMicrodeg, v['lat_microdeg']);
     expect(decoded.lonMicrodeg, v['lon_microdeg']);
     expect(decoded.accuracyM, v['accuracy_m']);

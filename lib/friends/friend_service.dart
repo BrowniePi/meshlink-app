@@ -81,6 +81,20 @@ class FriendService extends ChangeNotifier {
   final Map<String, DateTime> _lastQueryAt = {};
   final Map<String, Completer<LocationResponsePayload?>> _pendingQueries = {};
 
+  /// Freshest location answer seen per friend (keyed by username). With two
+  /// possible answerers per query — the target phone (live fix) and a node
+  /// (cached beacon) — a fresher answer can land after the query future
+  /// already completed; it is recorded here and listeners are notified.
+  final Map<String, LocationResponsePayload> lastKnownLocation = {};
+
+  /// When each friend's [lastKnownLocation] fix was actually taken
+  /// (arrival time minus beacon_age_s) — the freshest-wins comparison key.
+  final Map<String, DateTime> _lastFixAt = {};
+
+  /// Per-requester answer rate limit for queries about ME — same 60 s
+  /// contract the node enforces per (requester, target).
+  final Map<String, DateTime> _lastAnsweredAt = {};
+
   Uint8List get _myHint => pubkeyId(identity.publicKey);
 
   // ---- lifecycle ----
@@ -333,8 +347,9 @@ class FriendService extends ChangeNotifier {
       case msgTypeDirectMessage:
         return _onDirectMessage(msg);
       case msgTypeLocationQuery:
+        return _onLocationQuery(msg);
       case msgTypeLocation:
-        return true; // node-terminated types; nothing for a phone to do
+        return true; // node-terminated beacon; nothing for a phone to do
       default:
         return false;
     }
@@ -450,6 +465,78 @@ class FriendService extends ChangeNotifier {
     return true;
   }
 
+  /// A LOCATION_QUERY sprayed across the mesh reaches every phone; only the
+  /// token's issuer — the friend being asked about — answers, with a live
+  /// fix (beacon_age_s ≈ 0). Queries about anyone else are consumed here at
+  /// the app layer (the transport-level spray relay forwards them onward).
+  ///
+  /// Refusals are silent and uniform, matching the node: a stranger, a
+  /// stolen token, an expired grant, a disabled sharing switch, and a
+  /// rate-limited poll all look identical to a prober — no response.
+  Future<bool> _onLocationQuery(Message msg) async {
+    final CapabilityToken token;
+    try {
+      token = parseToken(decodeLocationQuery(msg.payload));
+    } on FormatException {
+      return true;
+    }
+    if (_hex(token.issuerPubkeyId) != _hex(_myHint)) {
+      return true; // about someone else — not ours to answer
+    }
+    // The envelope sender (Ed25519-verified at pipeline step 6) must BE the
+    // grantee — a stolen token is useless without the grantee's key.
+    final senderKey = Uint8List.fromList(msg.senderKey);
+    if (_hex(token.granteePubkeyId) != _hex(pubkeyId(senderKey))) {
+      return _refuseQuery('sender is not the grantee');
+    }
+    // Consent lives in the local switch, not just the token: sharing turned
+    // off since the token was minted means no answer, even before expiry.
+    final entry = store.byEd25519Pub(senderKey);
+    if (entry == null || !entry.record.locationSharingEnabled) {
+      return _refuseQuery('sharing not enabled for requester');
+    }
+    // Full verification: signed by OUR long-term key, grantee binding,
+    // scope, time window — same pure check the node runs.
+    final valid = await verifyToken(
+        token.raw, identity.publicKey, senderKey,
+        _now().millisecondsSinceEpoch ~/ 1000);
+    if (!valid) return _refuseQuery('token verification failed');
+
+    final requester = _hex(token.granteePubkeyId);
+    final last = _lastAnsweredAt[requester];
+    if (last != null && _now().difference(last) < queryMinInterval) {
+      return _refuseQuery('answer rate limit');
+    }
+    _lastAnsweredAt[requester] = _now();
+
+    final position = await _readPosition();
+    if (position == null) {
+      return _refuseQuery('no position available');
+    }
+    final payload = await encodeLocationResponse(
+      LocationResponsePayload(
+        targetPubkeyId: _myHint,
+        latMicrodeg: (position.lat * 1e6).round(),
+        lonMicrodeg: (position.lon * 1e6).round(),
+        accuracyM: position.accuracyM.round().clamp(0, 0xFFFF),
+        beaconAgeS: 0, // live fix, not a cached beacon
+        zoneId: broadcastZone,
+      ),
+      pubkeyId(entry.record.peerEd25519Pub),
+      entry.record.peerCurve25519Pub,
+    );
+    await _sendToPeers(msgTypeLocationResponse, payload);
+    _log('answered location query from ${entry.record.peerUsername}');
+    return true;
+  }
+
+  bool _refuseQuery(String reason) {
+    // Uniform refusal: nothing is sent back, whatever the reason. The
+    // reason exists only for the debug log (§8.3 — silent drop, log it).
+    _log('location query refused: $reason');
+    return true;
+  }
+
   Future<bool> _onLocationResponse(Message msg) async {
     if (!_isForMe(msg)) return true;
     final LocationResponsePayload payload;
@@ -459,15 +546,35 @@ class FriendService extends ChangeNotifier {
       _log('undecodable LOCATION_RESPONSE: $e');
       return true;
     }
-    // Resolve which pending query this answers; with one outstanding query
-    // per friend the earliest pending completer wins.
-    for (final entry in _pendingQueries.entries) {
-      if (!entry.value.isCompleted) {
-        entry.value.complete(payload);
-        break;
+    // The sealed body names its subject: resolve the friend whose pubkey_id
+    // matches. Two answers can race for one query (target phone live,
+    // node cached) — the first completes the pending future, and any
+    // fresher one still lands in [lastKnownLocation].
+    final entry = _entryByPubkeyId(payload.targetPubkeyId);
+    if (entry == null) return true; // answer about nobody we know
+    final username = entry.record.peerUsername;
+
+    final fixAt =
+        _now().subtract(Duration(seconds: payload.beaconAgeS));
+    final priorFixAt = _lastFixAt[username];
+    if (priorFixAt == null || fixAt.isAfter(priorFixAt)) {
+      lastKnownLocation[username] = payload;
+      _lastFixAt[username] = fixAt;
+      notifyListeners();
+    }
+
+    final pending = _pendingQueries[username];
+    if (pending != null && !pending.isCompleted) pending.complete(payload);
+    return true;
+  }
+
+  FriendEntry? _entryByPubkeyId(Uint8List id) {
+    for (final entry in store.entries) {
+      if (_hex(pubkeyId(entry.record.peerEd25519Pub)) == _hex(id)) {
+        return entry;
       }
     }
-    return true;
+    return null;
   }
 
   Future<bool> _onLocationRevoke(Message msg) async {

@@ -41,17 +41,24 @@ class FriendAcceptPayload {
 
 class LocationResponsePayload {
   LocationResponsePayload({
+    required this.targetPubkeyId,
     required this.latMicrodeg,
     required this.lonMicrodeg,
     required this.accuracyM,
     required this.beaconAgeS,
     required this.zoneId,
   });
+
+  /// Whose coordinate this answers about (8-byte pubkey_id). Two answerers
+  /// can race for one query — the target phone (live fix) and a node
+  /// (cached beacon) — so responses must self-identify their subject.
+  final Uint8List targetPubkeyId;
   final int latMicrodeg;
   final int lonMicrodeg;
   final int accuracyM;
 
-  /// How stale the node's coordinate is — surfaced as "updated Xs ago".
+  /// How stale the answerer's coordinate is — surfaced as "updated Xs ago".
+  /// ≈0 when the target phone itself answered with a live fix.
   final int beaconAgeS;
   final int zoneId;
 }
@@ -179,7 +186,9 @@ Uint8List decodeFriendDecline(Uint8List raw) {
   return raw.sublist(recipientHintSize);
 }
 
-/// LOCATION_QUERY payload is exactly the capability token.
+/// LOCATION_QUERY payload is exactly the capability token — the target is
+/// named by the token's issuer_pubkey_id, the requester by the envelope
+/// sender_key.
 Uint8List encodeLocationQuery(Uint8List capabilityToken) {
   if (capabilityToken.length != tokenSize) {
     throw ArgumentError('capability token has wrong size');
@@ -187,20 +196,49 @@ Uint8List encodeLocationQuery(Uint8List capabilityToken) {
   return capabilityToken;
 }
 
+Uint8List decodeLocationQuery(Uint8List raw) {
+  if (raw.length != tokenSize) {
+    throw const FormatException('LOCATION_QUERY payload malformed');
+  }
+  return raw;
+}
+
+/// Sealed body: target_pubkey_id(8) lat(i32) lon(i32) accuracy_m(u16)
+/// beacon_age_s(u32) zone_id(u16) — 24 bytes, mirrors core location/wire.py.
+const int _locationResponseBodySize = 24;
+
+Future<Uint8List> encodeLocationResponse(LocationResponsePayload payload,
+    Uint8List requesterHint, Uint8List requesterCurvePub) async {
+  if (payload.targetPubkeyId.length != recipientHintSize) {
+    throw ArgumentError('target pubkey_id must be $recipientHintSize bytes');
+  }
+  final body = Uint8List(_locationResponseBodySize);
+  final bd = ByteData.sublistView(body);
+  body.setRange(0, 8, payload.targetPubkeyId);
+  bd.setInt32(8, payload.latMicrodeg);
+  bd.setInt32(12, payload.lonMicrodeg);
+  bd.setUint16(16, payload.accuracyM);
+  bd.setUint32(18, payload.beaconAgeS);
+  bd.setUint16(22, payload.zoneId);
+  return Uint8List.fromList(
+      [...requesterHint, ...await seal(body, requesterCurvePub)]);
+}
+
 Future<LocationResponsePayload> decodeLocationResponse(
     Uint8List raw, SimpleKeyPair requesterCurveKeyPair) async {
   final body =
       await unseal(raw.sublist(recipientHintSize), requesterCurveKeyPair);
-  if (body.length != 16) {
+  if (body.length != _locationResponseBodySize) {
     throw const FormatException('LOCATION_RESPONSE payload malformed');
   }
   final bd = ByteData.sublistView(body);
   return LocationResponsePayload(
-    latMicrodeg: bd.getInt32(0),
-    lonMicrodeg: bd.getInt32(4),
-    accuracyM: bd.getUint16(8),
-    beaconAgeS: bd.getUint32(10),
-    zoneId: bd.getUint16(14),
+    targetPubkeyId: body.sublist(0, 8),
+    latMicrodeg: bd.getInt32(8),
+    lonMicrodeg: bd.getInt32(12),
+    accuracyM: bd.getUint16(16),
+    beaconAgeS: bd.getUint32(18),
+    zoneId: bd.getUint16(22),
   );
 }
 

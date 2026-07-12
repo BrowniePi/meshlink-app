@@ -251,6 +251,15 @@ class _SettingsPanelState extends State<SettingsPanel> {
                     Divider(color: c.stroke, height: 24),
                     _toggleRow(
                       c,
+                      icon: Icons.map_rounded,
+                      label: 'Real-world map',
+                      sub: 'Streets around you instead of the venue map',
+                      value: _c.realWorldMap,
+                      onChanged: _c.setRealWorldMap,
+                    ),
+                    Divider(color: c.stroke, height: 24),
+                    _toggleRow(
+                      c,
                       icon: Icons.wifi_tethering_rounded,
                       label: 'Turbo link',
                       sub: 'WiFi bursts to nodes · drains battery faster',
@@ -285,12 +294,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
                       ],
                     ),
                     const SizedBox(height: 8),
-                    _statRow(c, 'Connected node',
-                        peers.isEmpty
-                            ? '—'
-                            : _c.ownZoneId != null
-                                ? 'Zone ${_c.ownZoneId} · ${_short(peers.first)}'
-                                : _short(peers.first)),
+                    _statRow(c, 'Connected node', _connectedNode(peers)),
                     _statRow(c, 'Peers in range', '${peers.length}'),
                     _statRow(
                         c,
@@ -346,6 +350,19 @@ class _SettingsPanelState extends State<SettingsPanel> {
         ],
       ),
     );
+  }
+
+  /// The node's own name when its telemetry ping carried one, else what we
+  /// can infer from the link alone: zone id (from node traffic) and the raw
+  /// peer id.
+  String _connectedNode(List<String> peers) {
+    if (peers.isEmpty) return '—';
+    final name = _c.nodeInfo?.name;
+    if (name != null) return name;
+    final zone = _c.ownZoneId;
+    return zone != null
+        ? 'Zone $zone · ${_short(peers.first)}'
+        : _short(peers.first);
   }
 
   static String _short(String peer) =>

@@ -16,6 +16,7 @@ import '../../identity/token_storage.dart';
 import '../../power/battery_tier_manager.dart';
 import '../../telemetry/phone_ping_responder.dart';
 import '../../transport/failover_transport.dart';
+import '../../transport/spray_relay.dart';
 import '../../transport/transport.dart';
 
 /// Derived link quality to the mesh, driving the firefly's glow. There is no
@@ -389,22 +390,13 @@ class FireflyController extends ChangeNotifier {
     }));
     // One location query per friend who granted us a token; the service
     // rate-limits to the node's 60 s minimum, so a 30 s cycle just retries
-    // sooner after failures.
+    // sooner after failures. Answers land in the service's freshest-wins
+    // cache and reach [positions] via _onFriendsChanged — updating here too
+    // could overwrite a fresher racing answer with the first one back.
     for (final entry in friends.friends) {
       final username = entry.record.peerUsername;
       if (entry.theirTokenToMe == null || !isVisible(username)) continue;
-      unawaited(friends.queryFriendLocation(username).then((r) {
-        if (r == null) return;
-        positions[username] = FriendPosition(
-          latMicrodeg: r.latMicrodeg,
-          lonMicrodeg: r.lonMicrodeg,
-          accuracyM: r.accuracyM,
-          beaconAgeS: r.beaconAgeS,
-          zoneId: r.zoneId,
-          receivedAt: DateTime.now(),
-        );
-        notifyListeners();
-      }));
+      unawaited(friends.queryFriendLocation(username));
     }
   }
 
@@ -419,9 +411,27 @@ class FireflyController extends ChangeNotifier {
     };
   }
 
-  /// FriendService notified: detect newly-arrived incoming DMs to bump
-  /// unread badges, then re-render.
+  /// Payload objects already adopted from the service's freshest-wins cache,
+  /// so a notify for something else doesn't re-stamp receivedAt.
+  final Map<String, LocationResponsePayload> _adoptedLocation = {};
+
+  /// FriendService notified: adopt any fresher location answer (two can race
+  /// per query — the friend's phone live, a node cached; the service only
+  /// replaces its cache with a fresher fix), then detect newly-arrived
+  /// incoming DMs to bump unread badges, and re-render.
   void _onFriendsChanged() {
+    friends.lastKnownLocation.forEach((username, payload) {
+      if (identical(_adoptedLocation[username], payload)) return;
+      _adoptedLocation[username] = payload;
+      positions[username] = FriendPosition(
+        latMicrodeg: payload.latMicrodeg,
+        lonMicrodeg: payload.lonMicrodeg,
+        accuracyM: payload.accuracyM,
+        beaconAgeS: payload.beaconAgeS,
+        zoneId: payload.zoneId,
+        receivedAt: DateTime.now(),
+      );
+    });
     for (final e in friends.store.entries) {
       final username = e.record.peerUsername;
       final before = _dmCounts[username] ?? 0;
@@ -489,6 +499,16 @@ class FireflyController extends ChangeNotifier {
       notifyListeners();
       return;
     }
+
+    // Spray-and-Wait: pass the pipeline's onward copy to our other peers
+    // (battery-tier gated). Runs before local handling so relaying never
+    // waits on UI work.
+    unawaited(sprayRelay(
+      transport: transport,
+      fromPeer: peerId,
+      result: result,
+      batteryTier: batteryTier,
+    ));
 
     final message = result.message!;
     // Learn our zone from node traffic: a node stamps its own zone id on

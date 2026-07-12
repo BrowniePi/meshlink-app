@@ -68,19 +68,25 @@ void main() {
 
   test('LOCATION_RESPONSE decodes only for the requester (invariant 4)',
       () async {
-    // Build the sealed response the way the node does: hint + sealed 16-byte
-    // fixed struct (lat, lon, accuracy, beacon_age_s, zone_id).
-    final body = Uint8List(16);
-    final bd = ByteData.sublistView(body);
-    bd.setInt32(0, 37774900);
-    bd.setInt32(4, -122419400);
-    bd.setUint16(8, 12);
-    bd.setUint32(10, 40);
-    bd.setUint16(14, 0xFFFF);
-    final raw =
-        Uint8List.fromList([...hint, ...await seal(body, recipientCurvePub)]);
+    // Round-trip through the answerer-side encoder: hint + sealed 24-byte
+    // fixed struct (target_pubkey_id, lat, lon, accuracy, beacon_age_s,
+    // zone_id).
+    final targetId = Uint8List.fromList(List.filled(8, 0x42));
+    final raw = await encodeLocationResponse(
+      LocationResponsePayload(
+        targetPubkeyId: targetId,
+        latMicrodeg: 37774900,
+        lonMicrodeg: -122419400,
+        accuracyM: 12,
+        beaconAgeS: 40,
+        zoneId: 0xFFFF,
+      ),
+      hint,
+      recipientCurvePub,
+    );
 
     final decoded = await decodeLocationResponse(raw, recipientCurveKp);
+    expect(decoded.targetPubkeyId, targetId);
     expect(decoded.latMicrodeg, 37774900);
     expect(decoded.lonMicrodeg, -122419400);
     expect(decoded.accuracyM, 12);

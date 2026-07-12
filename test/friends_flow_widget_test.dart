@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:meshlink_app/config/backend_config.dart';
@@ -178,6 +180,7 @@ void main() {
     testWidgets('shows the coordinate with its beacon age', (tester) async {
       final friends = await stubService();
       friends.response = LocationResponsePayload(
+        targetPubkeyId: Uint8List.fromList(List.filled(8, 0x42)),
         latMicrodeg: 37774900,
         lonMicrodeg: -122419400,
         accuracyM: 12,

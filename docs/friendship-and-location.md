@@ -25,6 +25,17 @@ Mutual Consent / Node-Served Location). Counterpart notes:
    `beacon_age_s` as "updated Ns ago". Any refusal — never granted, revoked,
    expired, rate-limited, unknown user — renders identically as
    "Location not available".
+
+   The query is a sprayed mesh message, not a node RPC: it Spray-and-Waits
+   across phones and nodes like a DM. Two answerers exist — the **target
+   phone itself** answers with a live GPS fix (`beacon_age_s ≈ 0`,
+   `friend_service._onLocationQuery`), and any **node** holding a cached
+   beacon answers as the fallback for a target that is asleep or out of
+   reach. Responses carry an 8-byte `target_pubkey_id` so racing answers
+   correlate; the freshest lands in `FriendService.lastKnownLocation`. The
+   phone-side answer enforces consent against the *local* sharing switch,
+   so turning sharing off stops answers immediately even if the
+   LOCATION_REVOKE never propagates.
 5. **Direct messages** (added after the initial four) —
    `ui/direct_message_screen.dart`, from the chat-bubble icon on a friend's
    row. DIRECT_MESSAGE (0x0D) = 8-byte recipient hint + text sealed to the
@@ -39,6 +50,8 @@ Mutual Consent / Node-Served Location). Counterpart notes:
 
 | File | What |
 | --- | --- |
+| `lib/core/spray_and_wait.dart` | Spray-and-Wait split/wait-phase/budget-tracker — mirror of core `routing/spray_and_wait.py`; wired into pipeline step 8 (`PipelineResult.forward`) |
+| `lib/transport/spray_relay.dart` | Phone-side relay of the step-8 forward copy to other peers; the enforcement point for the battery tiers (only Active relay sprays) |
 | `lib/core/capability_token.dart` | 98-byte token mint/parse/verify — byte-identical to core `capability/token.py` (parity-tested) |
 | `lib/core/sealed.dart` | Sealed envelope (ephemeral X25519 → BLAKE3 KDF → ChaCha20-Poly1305); byte-compatible with core `crypto/sealed.py` |
 | `lib/core/friend_wire.dart` | FRIEND_REQUEST/ACCEPT/DECLINE, LOCATION_QUERY/RESPONSE/REVOKE, beacon codecs + 8-byte recipient hints |

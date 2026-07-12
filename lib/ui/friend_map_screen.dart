@@ -37,14 +37,32 @@ class _FriendMapScreenState extends State<FriendMapScreen> {
   @override
   void initState() {
     super.initState();
+    // Freshest-wins: two answers can race for one query (the friend's phone
+    // live, a node cached). The query future resolves with the first; any
+    // fresher one lands in the service's lastKnownLocation afterwards and
+    // arrives here through this listener.
+    widget.friends.addListener(_onFreshLocation);
     _query();
     _poll = Timer.periodic(const Duration(seconds: 60), (_) => _query());
   }
 
   @override
   void dispose() {
+    widget.friends.removeListener(_onFreshLocation);
     _poll?.cancel();
     super.dispose();
+  }
+
+  void _onFreshLocation() {
+    final cached = widget.friends.lastKnownLocation[widget.username];
+    // The service only replaces the cached entry with a fresher fix, so a
+    // new object here is by construction newer than what we show.
+    if (cached == null || identical(cached, _last)) return;
+    setState(() {
+      _everTried = true;
+      _last = cached;
+      _lastAt = DateTime.now();
+    });
   }
 
   Future<void> _query() async {

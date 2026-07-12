@@ -3,8 +3,16 @@ import 'dart:math';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
+import 'package:vector_map_tiles/vector_map_tiles.dart';
+import 'package:vector_tile_renderer/vector_tile_renderer.dart' as vtr;
 
 import '../../core/pipeline.dart';
+import '../../map/firefly_map_style.dart';
+import '../../map/map_tile_store.dart';
+import '../../map/offline_tile_provider.dart';
+import '../../map/region_prefetcher.dart';
 import '../../friends/friend_service.dart';
 import '../../identity/device_identity.dart';
 import '../../identity/token_storage.dart';
@@ -24,6 +32,10 @@ import 'venue_map.dart';
 /// Debug features (broadcast chat, attack menu, BLE logs, battery force)
 /// appear in the dock only when running with --dart-define=FF_DEBUG=true.
 const bool ffDebug = bool.fromEnvironment('FF_DEBUG');
+
+/// Centre of the tiles bundled in assets/map_tiles/ — where the real-world
+/// map opens before the first GPS fix (tool/fetch_map_tiles.dart default).
+const LatLng _bundledAreaCenter = LatLng(18.945, 72.835);
 
 enum _Panel { none, card, group, friends, settings, chat, debug }
 
@@ -62,7 +74,15 @@ class _FireflyHomeState extends State<FireflyHome>
     with TickerProviderStateMixin {
   late final FireflyController _c;
 
-  // map view state (world px, design coordinates)
+  // real-world map state
+  final MapController _mapController = MapController();
+  OfflineFirstTileProvider? _mapTiles;
+  MapRegionPrefetcher? _prefetcher;
+  final Map<Brightness, vtr.Theme> _mapThemes = {};
+  bool _mapTouched = false; // user panned/zoomed; don't yank the camera
+  bool _centeredOnFix = false;
+
+  // venue-map view state (world px, design coordinates)
   double _mapX = 0, _mapY = 0, _zoom = 1;
   bool _smooth = false, _interacting = false, _dragging = false;
   Timer? _uiTimer;
@@ -100,6 +120,14 @@ class _FireflyHomeState extends State<FireflyHome>
     _pulse = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 2400))
       ..repeat();
+    unawaited(MapTileStore.open().then((store) {
+      if (!mounted) return;
+      final tiles = OfflineFirstTileProvider(store);
+      setState(() {
+        _mapTiles = tiles;
+        _prefetcher = MapRegionPrefetcher(store, tiles);
+      });
+    }));
     WidgetsBinding.instance.addPostFrameCallback((_) => _recenter());
   }
 
@@ -107,13 +135,25 @@ class _FireflyHomeState extends State<FireflyHome>
   void dispose() {
     _uiTimer?.cancel();
     _pulse.dispose();
+    _mapController.dispose();
     _c.removeListener(_onModel);
     _c.dispose();
     super.dispose();
   }
 
   void _onModel() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    final own = _c.ownPosition;
+    if (own != null) {
+      // Top up offline coverage around wherever the user actually is.
+      unawaited(_prefetcher?.maybePrefetch(own.lat, own.lon) ?? Future.value());
+      // The map may have opened on the fallback area before the first GPS
+      // fix; snap to the user once, unless they're already exploring.
+      if (_c.realWorldMap && !_centeredOnFix && !_mapTouched) {
+        _centeredOnFix = _moveMap(LatLng(own.lat, own.lon), 16);
+      }
+    }
+    setState(() {});
   }
 
   // ---- map interaction ----
@@ -138,9 +178,56 @@ class _FireflyHomeState extends State<FireflyHome>
     });
   }
 
+  void _zoomBy(int steps) {
+    _wakeMap();
+    if (_c.realWorldMap) {
+      try {
+        final cam = _mapController.camera;
+        _moveMap(cam.center, cam.zoom + steps);
+      } catch (_) {} // map not built yet
+      return;
+    }
+    setState(() {
+      _smooth = true;
+      _zoom = _clampZoom(steps > 0 ? _zoom * 1.35 : _zoom / 1.35);
+    });
+  }
+
   void _recenter() {
     _wakeMap();
+    if (_c.realWorldMap) {
+      _moveMap(_ownLatLng ?? _bundledAreaCenter, 16);
+      return;
+    }
     _panTo(_c.youWorld, zoom: 1);
+  }
+
+  // ---- real-world map geometry ----
+
+  LatLng? get _ownLatLng {
+    final own = _c.ownPosition;
+    return own == null ? null : LatLng(own.lat, own.lon);
+  }
+
+  LatLng? _friendLatLng(String username) {
+    final p = _c.positions[username];
+    return p == null
+        ? null
+        : LatLng(p.latMicrodeg / 1e6, p.lonMicrodeg / 1e6);
+  }
+
+  LatLng? _findLatLng() {
+    final t = _findTarget;
+    if (t == null) return null;
+    final targets = t == 'group' ? _findGroup : [t.substring(5)];
+    final pts = [
+      for (final u in targets)
+        if (_friendLatLng(u) != null) _friendLatLng(u)!
+    ];
+    if (pts.isEmpty) return null;
+    return LatLng(
+        pts.map((p) => p.latitude).reduce((a, b) => a + b) / pts.length,
+        pts.map((p) => p.longitude).reduce((a, b) => a + b) / pts.length);
   }
 
   // ---- panel helpers ----
@@ -195,6 +282,18 @@ class _FireflyHomeState extends State<FireflyHome>
         _findTarget = 'user:$username';
       }
     });
+    if (_c.realWorldMap) {
+      final target = _findLatLng();
+      final own = _ownLatLng;
+      if (target != null) {
+        final centre = own == null
+            ? target
+            : LatLng((target.latitude + own.latitude) / 2,
+                (target.longitude + own.longitude) / 2);
+        _moveMap(centre, 16);
+      }
+      return;
+    }
     final target = _findWorld();
     if (target != null) {
       _panTo(Offset((target.dx + _c.youWorld.dx) / 2,
@@ -234,6 +333,42 @@ class _FireflyHomeState extends State<FireflyHome>
 
   // ---- clustering (design: 85 world-px greedy clusters) ----
 
+  /// Same greedy clustering as [_clusters], but over real coordinates for
+  /// the real-world map: 85 world-px at the venue scale is ~51 m.
+  ({List<List<String>> groups, List<String> singles}) _clustersGeo() {
+    final vis = [
+      for (final e in _c.friends.friends)
+        if (_c.isVisible(e.record.peerUsername) &&
+            _friendLatLng(e.record.peerUsername) != null)
+          e.record.peerUsername
+    ];
+    Offset meters(String u) {
+      final p = _friendLatLng(u)!;
+      return Offset(p.longitude * cos(p.latitude * pi / 180) * 111320,
+          p.latitude * 110540);
+    }
+
+    final used = <String>{};
+    final groups = <List<String>>[];
+    final singles = <String>[];
+    for (final u in vis) {
+      if (used.contains(u)) continue;
+      final pu = meters(u);
+      final members = [
+        for (final o in vis)
+          if (!used.contains(o) && (meters(o) - pu).distance < 51) o
+      ];
+      if (members.length >= 2) {
+        used.addAll(members);
+        groups.add(members);
+      } else {
+        used.add(u);
+        singles.add(u);
+      }
+    }
+    return (groups: groups, singles: singles);
+  }
+
   ({List<List<String>> groups, List<String> singles}) _clusters() {
     final vis = [
       for (final e in _c.friends.friends)
@@ -264,8 +399,10 @@ class _FireflyHomeState extends State<FireflyHome>
 
   String _meshStatus() {
     if (_c.strength == LinkStrength.offline) return 'Direct radio only';
+    final node = _c.nodeInfo?.name;
     final n = _c.peers.length;
-    return 'On mesh · $n peer${n == 1 ? '' : 's'}'
+    return '${node != null ? 'Via $node' : 'On mesh'}'
+        ' · $n peer${n == 1 ? '' : 's'}'
         '${_c.wifiOn ? ' · turbo' : ''}';
   }
 
@@ -283,7 +420,10 @@ class _FireflyHomeState extends State<FireflyHome>
               decoration: BoxDecoration(gradient: c.bg),
               child: Stack(
                 children: [
-                  _mapViewport(context),
+                  if (_c.realWorldMap)
+                    _realMapViewport(context)
+                  else
+                    _mapViewport(context),
                   ..._chrome(context),
                   ..._overlays(context),
                 ],
@@ -295,7 +435,120 @@ class _FireflyHomeState extends State<FireflyHome>
     );
   }
 
-  // ---- map viewport ----
+  // ---- real-world map viewport ----
+
+  /// Camera move that tolerates the map not being in the tree yet (mode
+  /// toggles and async tile-store startup race the first build). Returns
+  /// whether the move happened.
+  bool _moveMap(LatLng center, double zoom) {
+    try {
+      return _mapController.move(center, zoom.clamp(3, 19));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Widget _realMapViewport(BuildContext context) {
+    final c = FireflyTheme.of(context);
+    final tiles = _mapTiles;
+    if (tiles == null) return const SizedBox.shrink(); // store still opening
+    final clusters = _clustersGeo();
+    final own = _ownLatLng;
+    final findLL = _findLatLng();
+    final node = _c.nodeInfo;
+    final nodeLL = node?.lat != null && node?.lon != null
+        ? LatLng(node!.lat!, node.lon!)
+        : null;
+    return Positioned.fill(
+      child: FlutterMap(
+        mapController: _mapController,
+        options: MapOptions(
+          initialCenter: own ?? _bundledAreaCenter,
+          initialZoom: 16,
+          minZoom: 3,
+          maxZoom: 19,
+          backgroundColor: Colors.transparent,
+          interactionOptions: const InteractionOptions(
+              flags: InteractiveFlag.all & ~InteractiveFlag.rotate),
+          onMapEvent: (e) {
+            if (e.source != MapEventSource.mapController) {
+              _mapTouched = true;
+              _moved = 0;
+              _wakeMap();
+            }
+          },
+        ),
+        children: [
+          VectorTileLayer(
+            key: ValueKey('firefly-map-${c.brightness.name}'),
+            theme: _mapThemes.putIfAbsent(
+                c.brightness, () => fireflyMapTheme(c)),
+            tileProviders: TileProviders({mapSourceId: tiles}),
+            layerMode: VectorTileLayerMode.vector,
+          ),
+          if (own != null && findLL != null)
+            PolylineLayer(polylines: [
+              Polyline(
+                points: [own, findLL],
+                color: c.accent,
+                strokeWidth: 2,
+                pattern: StrokePattern.dashed(segments: const [6, 8]),
+              ),
+            ]),
+          MarkerLayer(markers: [
+            if (findLL != null)
+              Marker(
+                point: findLL,
+                width: 60,
+                height: 60,
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: c.accentLine, width: 1.5),
+                    ),
+                  ),
+                ),
+              ),
+            if (nodeLL != null)
+              Marker(
+                point: nodeLL,
+                width: 120,
+                height: 64,
+                child: _nodeMarkerBody(context, node!.name ?? 'Node'),
+              ),
+            for (final group in clusters.groups)
+              Marker(
+                point: _centroid([for (final u in group) _friendLatLng(u)!]),
+                width: 140,
+                height: 84,
+                child: _groupMarkerBody(context, group),
+              ),
+            for (final u in clusters.singles)
+              Marker(
+                point: _friendLatLng(u)!,
+                width: 80,
+                height: 80,
+                child: _singleMarkerBody(context, u),
+              ),
+            if (own != null)
+              Marker(
+                point: own,
+                width: 160,
+                height: 160,
+                child: Center(child: _youMarkerBody(context)),
+              ),
+          ]),
+        ],
+      ),
+    );
+  }
+
+  LatLng _centroid(List<LatLng> pts) => LatLng(
+      pts.map((p) => p.latitude).reduce((a, b) => a + b) / pts.length,
+      pts.map((p) => p.longitude).reduce((a, b) => a + b) / pts.length);
+
+  // ---- venue map viewport ----
 
   Widget _mapViewport(BuildContext context) {
     final size = MediaQuery.of(context).size;
@@ -405,31 +658,53 @@ class _FireflyHomeState extends State<FireflyHome>
   }
 
   Widget _nodeMarker(BuildContext context, int zoneId) {
-    final c = FireflyTheme.of(context);
     final at = zoneAnchor(zoneId);
     return Positioned(
-      left: at.dx - 16,
+      left: at.dx - 60,
       top: at.dy - 16,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              gradient: c.glass(),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: c.accentLine),
-              boxShadow: [BoxShadow(color: c.accentGlow, blurRadius: 14)],
-            ),
-            child: Icon(Icons.hub_rounded, size: 16, color: c.accent),
-          ),
-          const SizedBox(height: 4),
-          Text('ZONE $zoneId',
-              style: TextStyle(
-                  fontSize: 9, letterSpacing: 1, color: c.faint)),
-        ],
+      child: SizedBox(
+        width: 120,
+        child: _nodeMarkerBody(
+            context, _c.nodeInfo?.name ?? 'ZONE $zoneId'),
       ),
+    );
+  }
+
+  /// Node marker body — a glassy hub tile with an accent-ringed name chip,
+  /// visually distinct from the circular friend avatars.
+  Widget _nodeMarkerBody(BuildContext context, String label) {
+    final c = FireflyTheme.of(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 32,
+          height: 32,
+          decoration: BoxDecoration(
+            gradient: c.glass(),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: c.accentLine),
+            boxShadow: [BoxShadow(color: c.accentGlow, blurRadius: 14)],
+          ),
+          child: Icon(Icons.hub_rounded, size: 16, color: c.accent),
+        ),
+        const SizedBox(height: 4),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+            gradient: c.glass(),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: c.accentLine),
+          ),
+          child: Text(label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                  color: c.accent)),
+        ),
+      ],
     );
   }
 
@@ -455,6 +730,14 @@ class _FireflyHomeState extends State<FireflyHome>
   }
 
   Widget _youMarker(BuildContext context, Offset you) {
+    return Positioned(
+      left: you.dx - 23,
+      top: you.dy - 23,
+      child: _youMarkerBody(context),
+    );
+  }
+
+  Widget _youMarkerBody(BuildContext context) {
     final c = FireflyTheme.of(context);
     final strength = _c.strength;
     final offline = strength == LinkStrength.offline;
@@ -480,10 +763,8 @@ class _FireflyHomeState extends State<FireflyHome>
             ? 1.15
             : 1.0;
 
-    return Positioned(
-      left: you.dx - 23,
-      top: you.dy - 23,
-      child: Column(
+    return Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
           SizedBox(
             width: 46,
@@ -541,9 +822,7 @@ class _FireflyHomeState extends State<FireflyHome>
                   fontWeight: FontWeight.w600,
                   letterSpacing: 1,
                   color: c.faint)),
-        ],
-      ),
-    );
+        ]);
   }
 
   Widget _nameChip(BuildContext context, String text) {
@@ -580,16 +859,21 @@ class _FireflyHomeState extends State<FireflyHome>
   }
 
   Widget _singleMarker(BuildContext context, String username) {
-    final c = FireflyTheme.of(context);
     final world = _c.worldOf(username)!;
-    final finding = _findTarget == 'user:$username';
-    final unread = _c.unread[username] ?? 0;
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 1400),
       curve: Curves.easeInOut,
       left: world.dx - 40,
       top: world.dy - 30,
-      child: GestureDetector(
+      child: _singleMarkerBody(context, username),
+    );
+  }
+
+  Widget _singleMarkerBody(BuildContext context, String username) {
+    final c = FireflyTheme.of(context);
+    final finding = _findTarget == 'user:$username';
+    final unread = _c.unread[username] ?? 0;
+    return GestureDetector(
         onTap: () => _openCard(username),
         child: SizedBox(
           width: 80,
@@ -624,27 +908,30 @@ class _FireflyHomeState extends State<FireflyHome>
               _nameChip(context, username),
             ],
           ),
-        ),
-      ),
-    );
+        ));
   }
 
   Widget _groupMarker(BuildContext context, List<String> members) {
-    final c = FireflyTheme.of(context);
     final pts = [for (final u in members) _c.worldOf(u)!];
     final center = pts.reduce((a, b) => a + b) / members.length.toDouble();
+    return AnimatedPositioned(
+      duration: const Duration(milliseconds: 1400),
+      curve: Curves.easeInOut,
+      left: center.dx - 70,
+      top: center.dy - 34,
+      child: _groupMarkerBody(context, members),
+    );
+  }
+
+  Widget _groupMarkerBody(BuildContext context, List<String> members) {
+    final c = FireflyTheme.of(context);
     final unread =
         members.fold(0, (a, u) => a + (_c.unread[u] ?? 0));
     final finding = _findTarget == 'group' &&
         members.every(_findGroup.contains);
     final label = '${members.first.split(' ').first} +${members.length - 1}';
 
-    return AnimatedPositioned(
-      duration: const Duration(milliseconds: 1400),
-      curve: Curves.easeInOut,
-      left: center.dx - 70,
-      top: center.dy - 34,
-      child: GestureDetector(
+    return GestureDetector(
         onTap: () => _openGroup(members),
         child: SizedBox(
           width: 140,
@@ -704,9 +991,7 @@ class _FireflyHomeState extends State<FireflyHome>
               _nameChip(context, label),
             ],
           ),
-        ),
-      ),
-    );
+        ));
   }
 
   // ---- floating chrome ----
@@ -824,24 +1109,12 @@ class _FireflyHomeState extends State<FireflyHome>
                 GlassIconButton(
                     icon: Icons.add_rounded,
                     tooltip: 'Zoom in',
-                    onTap: () {
-                      _wakeMap();
-                      setState(() {
-                        _smooth = true;
-                        _zoom = _clampZoom(_zoom * 1.35);
-                      });
-                    }),
+                    onTap: () => _zoomBy(1)),
                 const SizedBox(height: 8),
                 GlassIconButton(
                     icon: Icons.remove_rounded,
                     tooltip: 'Zoom out',
-                    onTap: () {
-                      _wakeMap();
-                      setState(() {
-                        _smooth = true;
-                        _zoom = _clampZoom(_zoom / 1.35);
-                      });
-                    }),
+                    onTap: () => _zoomBy(-1)),
                 const SizedBox(height: 8),
                 GlassIconButton(
                     icon: Icons.my_location_rounded,
@@ -853,6 +1126,16 @@ class _FireflyHomeState extends State<FireflyHome>
           ),
         ),
       ),
+      // OpenStreetMap attribution (ODbL requirement for the real-world map)
+      if (_c.realWorldMap)
+        Positioned(
+          left: 12,
+          bottom: 10,
+          child: IgnorePointer(
+            child: Text('© OpenStreetMap contributors',
+                style: TextStyle(fontSize: 9, color: c.faint)),
+          ),
+        ),
       // transport error strip
       if (_c.transportError != null)
         Positioned(

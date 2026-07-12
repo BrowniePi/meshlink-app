@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:battery_plus/battery_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 
 import '../debug/debug_log.dart' as dbg;
@@ -11,7 +11,8 @@ import '../debug/debug_log.dart' as dbg;
 /// telemetry ping (docs/phone-ping-app-spec.md; node reference
 /// meshlink-node/node/monitoring/phone_ping.py).
 ///
-/// The node sends `MLPP1{"t":"ping"}` over whichever transport the phone is
+/// The node sends `MLPP1{"t":"ping",…}` (optionally carrying its own
+/// node_name/node_lat/node_lon) over whichever transport the phone is
 /// connected on; the app answers with
 /// `MLPP1{"t":"pong","lat":…,"lon":…,"battery":…,"charging":…}` on the same
 /// transport. Telemetry frames are demuxed off the mesh-packet path by
@@ -45,6 +46,20 @@ Uint8List encodePong({double? lat, double? lon, int? battery, bool? charging}) {
   return Uint8List.fromList([...phonePingMagic, ...utf8.encode(jsonEncode(body))]);
 }
 
+/// Identity the node advertises inside its ping (`node_name`/`node_lat`/
+/// `node_lon`, each omitted when unconfigured on the node — see
+/// meshlink-node phone_ping.encode_ping).
+class NodeInfo {
+  NodeInfo({required this.peerId, this.name, this.lat, this.lon})
+      : receivedAt = DateTime.now();
+
+  final String peerId;
+  final String? name;
+  final double? lat;
+  final double? lon;
+  final DateTime receivedAt;
+}
+
 /// One telemetry reading, computed fresh per ping — nothing is stored.
 class TelemetryReading {
   const TelemetryReading({this.lat, this.lon, this.battery, this.charging});
@@ -67,9 +82,21 @@ class PhonePingResponder {
 
   final TelemetryReader _read;
 
+  /// Last node identity heard in a ping — the UI shows the connected node's
+  /// name and places it on the map. Null until a ping carries any of the
+  /// node_* keys; staleness is the reader's concern ([NodeInfo.receivedAt]).
+  final ValueNotifier<NodeInfo?> nodeInfo = ValueNotifier(null);
+
   /// Peers with a pong already in flight: a second ping that arrives while
   /// resolving location is coalesced into the pending answer (spec §4).
   final Set<String> _inFlight = {};
+
+  /// Telemetry is the one path with no on-screen trace of its own, so its
+  /// lines go to both the debug screen's buffer and the run console.
+  void _log(String message, {dbg.LogLevel level = dbg.LogLevel.info}) {
+    dbg.DebugLog.instance.log('telemetry', message, level: level);
+    debugPrint('[telemetry] $message');
+  }
 
   /// Handle one reassembled telemetry frame. Invalid JSON, a missing "t",
   /// or an unknown type are dropped silently, mirroring the node's lenient
@@ -83,6 +110,27 @@ class PhonePingResponder {
     }
     // Unknown extra keys are tolerated; only "t" matters (spec §3).
     if (body is! Map || body['t'] != 'ping') return;
+    // Node identity riding on the ping (lenient: each key optional). Read
+    // before the coalesce check so a coalesced burst still refreshes it.
+    final name = body['node_name'];
+    final lat = body['node_lat'];
+    final lon = body['node_lon'];
+    _log('ping ← $peerId ${jsonEncode(body)}');
+    if (name is String || lat is num || lon is num) {
+      nodeInfo.value = NodeInfo(
+        peerId: peerId,
+        name: name is String ? name : null,
+        lat: lat is num ? lat.toDouble() : null,
+        lon: lon is num ? lon.toDouble() : null,
+      );
+      _log('node identity: name=${name ?? '—'} lat=${lat ?? '—'} '
+          'lon=${lon ?? '—'}');
+    } else {
+      _log(
+          'ping from $peerId carries no node identity — node_name/node_lat/'
+          'node_lon are unset on the node itself',
+          level: dbg.LogLevel.warn);
+    }
     if (!_inFlight.add(peerId)) return; // coalesce: one answer per burst
 
     try {
@@ -94,15 +142,12 @@ class PhonePingResponder {
         charging: reading.charging,
       );
       await send(peerId, pong);
-      dbg.DebugLog.instance.log(
-          'telemetry',
-          'pong → $peerId (lat=${reading.lat} lon=${reading.lon} '
-              'battery=${reading.battery} charging=${reading.charging})');
+      _log('pong → $peerId (lat=${reading.lat} lon=${reading.lon} '
+          'battery=${reading.battery} charging=${reading.charging})');
     } catch (e) {
       // Peer dropped mid-answer or a platform read blew up: the node ages
       // out the missing report after 3 missed pings; nothing to retry.
-      dbg.DebugLog.instance
-          .log('telemetry', 'pong to $peerId failed: $e', level: dbg.LogLevel.warn);
+      _log('pong to $peerId failed: $e', level: dbg.LogLevel.warn);
     } finally {
       _inFlight.remove(peerId);
     }

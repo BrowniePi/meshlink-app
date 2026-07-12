@@ -14,6 +14,7 @@ import '../../friends/friend_service.dart';
 import '../../identity/device_identity.dart';
 import '../../identity/token_storage.dart';
 import '../../power/battery_tier_manager.dart';
+import '../../telemetry/phone_ping_responder.dart';
 import '../../transport/failover_transport.dart';
 import '../../transport/transport.dart';
 
@@ -149,6 +150,14 @@ class FireflyController extends ChangeNotifier {
   /// Theme preference (session-scoped).
   final ValueNotifier<bool> darkMode = ValueNotifier(true);
 
+  /// Real-world map (streets around you) vs the venue-art backdrop.
+  bool realWorldMap = true;
+
+  void setRealWorldMap(bool on) {
+    realWorldMap = on;
+    notifyListeners();
+  }
+
   String? get transportError => _transportError;
 
   // ---- lifecycle ----
@@ -188,6 +197,18 @@ class FireflyController extends ChangeNotifier {
 
   bool get wifiOn => transport is FailoverTransport &&
       (transport as FailoverTransport).wifiEnabled.value;
+
+  /// The node identity carried on its telemetry pings, while fresh. The node
+  /// pings every 2 minutes and ages a phone out after 3 missed pings; the
+  /// same 3-interval window keeps this honest across a brief disconnect.
+  NodeInfo? get nodeInfo {
+    final t = transport;
+    if (t is! FailoverTransport) return null;
+    final info = t.phonePing?.nodeInfo.value;
+    if (info == null) return null;
+    final age = DateTime.now().difference(info.receivedAt);
+    return age > const Duration(minutes: 6) ? null : info;
+  }
 
   LinkStrength get strength {
     final t = transport;

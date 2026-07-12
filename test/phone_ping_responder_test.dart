@@ -100,6 +100,31 @@ void main() {
       expect(sent, hasLength(2));
     });
 
+    test('node identity riding on the ping is captured for the UI', () async {
+      final responder =
+          PhonePingResponder(reader: () async => const TelemetryReading());
+      Future<void> send(String peer, Uint8List frame) async {}
+
+      // Plain ping (node unconfigured): nothing captured.
+      await responder.handle('ble:node', _frame('{"t":"ping"}'), send);
+      expect(responder.nodeInfo.value, isNull);
+
+      await responder.handle(
+          'ble:node',
+          _frame('{"t":"ping","node_name":"Gate N","node_lat":18.94,'
+              '"node_lon":72.83}'),
+          send);
+      final info = responder.nodeInfo.value!;
+      expect(info.peerId, 'ble:node');
+      expect(info.name, 'Gate N');
+      expect(info.lat, 18.94);
+      expect(info.lon, 72.83);
+
+      // A later plain ping doesn't clobber the captured identity.
+      await responder.handle('ble:node', _frame('{"t":"ping"}'), send);
+      expect(responder.nodeInfo.value?.name, 'Gate N');
+    });
+
     test('a send failure never escapes (node ages the report out)', () async {
       final responder =
           PhonePingResponder(reader: () async => const TelemetryReading());

@@ -41,6 +41,11 @@ dependencies:
   http: ^1.6.0
   battery_plus: ^7.1.0
   geolocator: ^14.0.3
+  flutter_map: ^7.0.2
+  vector_map_tiles: ^8.0.0
+  latlong2: ^0.9.1
+  path_provider: ^2.1.6
+  vector_tile_renderer: ^5.2.1
 
 dev_dependencies:
   flutter_test:
@@ -70,6 +75,11 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+    # Offline map floor: vector tiles for the demo area, fetched by
+    # tool/fetch_map_tiles.dart (see that file to change the area).
+    - assets/map_tiles/
 
   fonts:
     - family: Space Grotesk

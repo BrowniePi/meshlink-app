@@ -109,16 +109,16 @@ class AuthService extends ChangeNotifier {
     await _adopt(session);
   }
 
-  /// Clears the account session and the attestation token only. Device
-  /// keypairs and the FriendStore friend list are intentionally left intact
-  /// (re-login rebinds the same identity to the account).
+  /// Clears all account-scoped state. Device keypairs remain intact; friend
+  /// state is recovered from Supabase after the next login.
   Future<void> logout() async {
     dbg.DebugLog.instance.log(
         'auth', 'logout: clearing session for ${_session?.username ?? '?'} '
-            'and attestation token');
+            'and account data');
     _session = null;
     await sessionStorage.clear();
     await tokenStorage.clear();
+    await _friends?.clearAccountData();
     notifyListeners();
   }
 

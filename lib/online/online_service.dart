@@ -72,6 +72,10 @@ class OnlineService extends ChangeNotifier {
   /// mode switch, and what the UI indicator shows.
   bool get connected => _connected;
 
+  /// REST remains usable through the node's MLBP1 backend proxy even when
+  /// the direct Supabase realtime socket is down.
+  bool get canRequest => _connected || client.fallbackAvailable;
+
   /// Instant of the last connectivity flip, for "online since"/"offline
   /// since" UI copy.
   DateTime? lastChangeAt;
@@ -80,6 +84,8 @@ class OnlineService extends ChangeNotifier {
   void start() {
     if (_running) return;
     _running = true;
+    _pollTimer = Timer.periodic(onlinePollInterval, (_) => _poll());
+    unawaited(_poll());
     unawaited(_connect());
   }
 
@@ -175,7 +181,6 @@ class OnlineService extends ChangeNotifier {
 
   void _onSocketClosed() {
     _socket = null;
-    _pollTimer?.cancel();
     _heartbeatTimer?.cancel();
     _setConnected(false);
     if (!_running) return;
@@ -222,7 +227,7 @@ class OnlineService extends ChangeNotifier {
     final h = handler;
     // No overlapping polls: a push-triggered poll racing the periodic one
     // would hand the same not-yet-acked inbox rows to the handler twice.
-    if (h == null || !_connected || _polling) return;
+    if (h == null || !canRequest || _polling) return;
     _polling = true;
     try {
       final messages = await client.inbox();

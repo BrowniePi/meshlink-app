@@ -107,7 +107,8 @@ class _FriendsPanelState extends State<FriendsPanel> {
   @override
   Widget build(BuildContext context) {
     final c = FireflyTheme.of(context);
-    final requests = _c.friends.pendingRequests;
+    final receivedRequests = _c.friends.receivedRequests;
+    final sentRequests = _c.friends.sentRequests;
     final friends = _c.friends.friends;
 
     return GlassPanel(
@@ -174,13 +175,21 @@ class _FriendsPanelState extends State<FriendsPanel> {
               shrinkWrap: true,
               padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
               children: [
-                if (requests.isNotEmpty) ...[
-                  _sectionLabel(c, 'REQUESTS'),
-                  for (final entry in requests)
+                if (receivedRequests.isNotEmpty) ...[
+                  _sectionLabel(c, 'RECEIVED REQUESTS'),
+                  for (final entry in receivedRequests)
                     _requestRow(c, entry.record.peerUsername),
                   const SizedBox(height: 8),
                 ],
-                if (friends.isEmpty && requests.isEmpty)
+                if (sentRequests.isNotEmpty) ...[
+                  _sectionLabel(c, 'SENT REQUESTS'),
+                  for (final entry in sentRequests)
+                    _sentRequestRow(c, entry.record.peerUsername),
+                  const SizedBox(height: 8),
+                ],
+                if (friends.isEmpty &&
+                    receivedRequests.isEmpty &&
+                    sentRequests.isEmpty)
                   Padding(
                     padding: const EdgeInsets.all(24),
                     child: Text('No friends yet — add one by username.',
@@ -258,6 +267,39 @@ class _FriendsPanelState extends State<FriendsPanel> {
               child: Icon(Icons.close_rounded, size: 18, color: c.dim),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sentRequestRow(FfColors c, String username) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+      decoration: BoxDecoration(
+        gradient: c.glass(),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: c.stroke),
+      ),
+      child: Row(
+        children: [
+          InitialAvatar(name: username, size: 40),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('@$username',
+                    style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: c.text)),
+                Text('request sent · awaiting response',
+                    style: TextStyle(fontSize: 12, color: c.dim)),
+              ],
+            ),
+          ),
+          Icon(Icons.schedule_rounded, size: 19, color: c.faint),
         ],
       ),
     );

@@ -17,7 +17,8 @@ import 'transport.dart';
 /// phone↔node demux pattern as the `MLPP1` telemetry ping:
 ///
 ///     app → node: MLBP1{"t":"req","id":"a3","method":"POST",
-///                       "path":"/tickets","headers":{…},"body":"{…}"}
+///                       "path":"/rest/v1/rpc/send_friend_request",
+///                       "headers":{…},"body":"{…}"}
 ///     node → app: MLBP1{"t":"res","id":"a3","status":201,"body":"{…}"}
 ///                 MLBP1{"t":"res","id":"a3","status":0,"error":"…"}
 ///

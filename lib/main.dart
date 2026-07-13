@@ -82,6 +82,7 @@ Future<void> main() async {
     client: OnlineClient(
       config: BackendConfig.fromEnvironment,
       accessToken: authService.validAccessToken,
+      fallbackAvailable: () => backendChannel.available,
       client: backendClient,
     ),
     accessToken: authService.validAccessToken,
@@ -293,7 +294,6 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
   static Future<({double lat, double lon, double accuracyM})?>
       _readBeaconPosition() async {
     try {
-      if (!await Geolocator.isLocationServiceEnabled()) return null;
       var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
@@ -303,16 +303,19 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
         return null;
       }
       Position? position;
-      try {
-        position = await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.high,
-            timeLimit: Duration(seconds: 4),
-          ),
-        );
-      } on TimeoutException {
-        position = await Geolocator.getLastKnownPosition();
+      if (await Geolocator.isLocationServiceEnabled()) {
+        try {
+          position = await Geolocator.getCurrentPosition(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.high,
+              timeLimit: Duration(seconds: 4),
+            ),
+          );
+        } catch (_) {
+          // Fall through to the OS-maintained last fix below.
+        }
       }
+      position ??= await Geolocator.getLastKnownPosition();
       if (position == null) return null;
       return (
         lat: position.latitude,

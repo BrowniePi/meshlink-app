@@ -101,7 +101,8 @@ class _FriendsScreenState extends State<FriendsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final requests = widget.friends.pendingRequests;
+    final receivedRequests = widget.friends.receivedRequests;
+    final sentRequests = widget.friends.sentRequests;
     final friends = widget.friends.friends;
     return Scaffold(
       appBar: AppBar(
@@ -114,9 +115,9 @@ class _FriendsScreenState extends State<FriendsScreen> {
       ),
       body: ListView(
         children: [
-          if (requests.isNotEmpty) ...[
-            const _SectionLabel('Friend requests'),
-            for (final entry in requests)
+          if (receivedRequests.isNotEmpty) ...[
+            const _SectionLabel('Received requests'),
+            for (final entry in receivedRequests)
               ListTile(
                 leading: const Icon(Icons.mark_email_unread_outlined),
                 title: Text(entry.record.peerUsername),
@@ -139,6 +140,15 @@ class _FriendsScreenState extends State<FriendsScreen> {
                 ),
               ),
           ],
+          if (sentRequests.isNotEmpty) ...[
+            const _SectionLabel('Sent requests'),
+            for (final entry in sentRequests)
+              ListTile(
+                leading: const Icon(Icons.outgoing_mail),
+                title: Text(entry.record.peerUsername),
+                subtitle: const Text('awaiting response'),
+              ),
+          ],
           const _SectionLabel('Friends'),
           if (friends.isEmpty)
             const Padding(
@@ -155,7 +165,8 @@ class _FriendsScreenState extends State<FriendsScreen> {
   Widget _friendTile(FriendEntry entry) {
     final username = entry.record.peerUsername;
     final sharing = entry.record.locationSharingEnabled;
-    final theyShare = entry.theirTokenToMe != null;
+    final theyShare = entry.theirTokenToMe != null ||
+        widget.friends.lastKnownLocation.containsKey(username);
     return Column(
       children: [
         ListTile(

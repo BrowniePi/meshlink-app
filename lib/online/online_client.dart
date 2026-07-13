@@ -66,12 +66,19 @@ class OnlineClient {
   OnlineClient({
     required this.config,
     required this.accessToken,
+    bool Function()? fallbackAvailable,
     http.Client? client,
-  }) : _client = client ?? http.Client();
+  })  : _fallbackAvailable = fallbackAvailable ?? (() => false),
+        _client = client ?? http.Client();
 
   final BackendConfig config;
   final Future<String> Function() accessToken;
+  final bool Function() _fallbackAvailable;
   final http.Client _client;
+
+  /// Whether authenticated REST can currently travel through the mesh node
+  /// even though the direct realtime socket is offline.
+  bool get fallbackAvailable => _fallbackAvailable();
 
   Uri _uri(String path) => Uri.parse('${config.baseUrl}$path');
 

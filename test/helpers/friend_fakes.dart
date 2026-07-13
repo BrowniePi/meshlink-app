@@ -67,8 +67,7 @@ class FakeDirectoryClient extends DirectoryClient {
 
   final Map<String, Map<String, String>> registry;
 
-  @override
-  Future<void> createAccount({
+  Future<void> registerAccount({
     required String username,
     required Uint8List curve25519Pub,
     required Uint8List ed25519Pub,
@@ -130,6 +129,15 @@ class FakePhone {
   final FriendService friends;
 
   ({double lat, double lon, double accuracyM})? position;
+
+  Future<void> createAccount(String username) async {
+    await (friends.directory as FakeDirectoryClient).registerAccount(
+      username: username,
+      curve25519Pub: friends.encryption.publicKey,
+      ed25519Pub: friends.identity.publicKey,
+    );
+    await friends.bindAccount(username);
+  }
 
   static Future<FakePhone> create(
     Map<String, Map<String, String>> registry, {

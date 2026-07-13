@@ -25,8 +25,8 @@ void main() {
     registry = {};
     alice = await FakePhone.create(registry);
     bob = await FakePhone.create(registry);
-    await alice.friends.createAccount('alice');
-    await bob.friends.createAccount('bob');
+    await alice.createAccount('alice');
+    await bob.createAccount('bob');
   });
 
   tearDown(() {
@@ -43,11 +43,11 @@ void main() {
 
   test('flow 1: account creation registers once, duplicates rejected',
       () async {
-    expect(alice.friends.hasAccount, isTrue);
+    expect(alice.friends.store.ownUsername, 'alice');
     expect(registry.keys, containsAll(['alice', 'bob']));
     final imposter = await FakePhone.create(registry);
     addTearDown(imposter.friends.dispose);
-    expect(() => imposter.friends.createAccount('alice'),
+    expect(() => imposter.createAccount('alice'),
         throwsA(isA<DirectoryException>()));
   });
 
@@ -59,6 +59,10 @@ void main() {
     // Bob sees a pending request; nothing was auto-accepted.
     expect(bob.friends.pendingRequests.map((e) => e.record.peerUsername),
         ['alice']);
+    expect(bob.friends.receivedRequests.map((e) => e.record.peerUsername),
+        ['alice']);
+    expect(alice.friends.sentRequests.map((e) => e.record.peerUsername),
+        ['bob']);
     expect(bob.friends.friends, isEmpty);
     expect(alice.friends.friends, isEmpty);
 
@@ -77,7 +81,7 @@ void main() {
     var clock = DateTime.utc(2026, 1, 1);
     final ann = await FakePhone.create(registry, now: () => clock);
     addTearDown(ann.friends.dispose);
-    await ann.friends.createAccount('ann');
+    await ann.createAccount('ann');
 
     // Nobody in radio range: the packet reaches no one and there is no
     // delivery receipt that would say so.
@@ -104,11 +108,21 @@ void main() {
         ['ann']);
   });
 
+  test('submitting the same outbound request again retries it', () async {
+    alice.transport.peers = [];
+    expect(await alice.friends.sendFriendRequest('bob'), 0);
+    expect(alice.friends.sentRequests.single.record.peerUsername, 'bob');
+
+    alice.transport.peers = ['node-1'];
+    expect(await alice.friends.sendFriendRequest('bob'), 1);
+    expect(alice.friends.sentRequests.single.record.peerUsername, 'bob');
+  });
+
   test('an answered request stops being re-sprayed', () async {
     var clock = DateTime.utc(2026, 1, 1);
     final ann = await FakePhone.create(registry, now: () => clock);
     addTearDown(ann.friends.dispose);
-    await ann.friends.createAccount('ann');
+    await ann.createAccount('ann');
 
     await ann.friends.sendFriendRequest('bob');
     await ann.deliverTo(bob);
@@ -141,7 +155,7 @@ void main() {
     // validly signed with HER key, which does not match the TOFU-pinned one.
     final mallory = await FakePhone.create(registry);
     addTearDown(mallory.friends.dispose);
-    await mallory.friends.createAccount('mallory');
+    await mallory.createAccount('mallory');
     // Craft: mallory receives the request meant for bob (mesh fan-out) and
     // tries to accept it. Her service refuses locally (no matching entry),
     // so drive the wire directly: her accept of a fabricated entry.
@@ -220,7 +234,7 @@ void main() {
     final phones = registry; // keep registry shared
     final carol = await FakePhone.create(phones, now: () => now);
     addTearDown(carol.friends.dispose);
-    await carol.friends.createAccount('carol');
+    await carol.createAccount('carol');
 
     await carol.friends.sendFriendRequest('bob');
     await carol.deliverTo(bob);
@@ -301,7 +315,7 @@ void main() {
     // her envelope is signed with HER key — not the token's grantee.
     final mallory = await FakePhone.create(registry);
     addTearDown(mallory.friends.dispose);
-    await mallory.friends.createAccount('mallory');
+    await mallory.createAccount('mallory');
     final stolen = alice.friends.store.byUsername('bob')!.theirTokenToMe!;
     final packet = await buildSignedPacket(
       identity: mallory.friends.identity,
@@ -346,7 +360,7 @@ void main() {
     await befriend();
     final mallory = await FakePhone.create(registry);
     addTearDown(mallory.friends.dispose);
-    await mallory.friends.createAccount('mallory');
+    await mallory.createAccount('mallory');
 
     // Alice→Bob traffic relayed through Mallory's phone: unreadable, ignored.
     await alice.friends.sendDirectMessage('bob', 'secret plans');
@@ -408,7 +422,7 @@ void main() {
     // Same storage, fresh service — as after an app relaunch.
     final revived = await FakePhone.createWithStorage(alice.storage, registry);
     addTearDown(revived.friends.dispose);
-    expect(revived.friends.hasAccount, isTrue);
+    expect(revived.friends.store.ownUsername, 'alice');
     expect(revived.friends.friends.single.record.peerUsername, 'bob');
     expect(
         revived.friends.store.byUsername('bob')!.theirTokenToMe, isNotNull);

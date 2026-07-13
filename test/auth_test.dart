@@ -8,10 +8,14 @@ import 'package:meshlink_app/auth/auth_client.dart';
 import 'package:meshlink_app/auth/auth_service.dart';
 import 'package:meshlink_app/auth/session_storage.dart';
 import 'package:meshlink_app/config/backend_config.dart';
+import 'package:meshlink_app/friends/friend_state.dart';
+import 'package:meshlink_app/friends/friend_store.dart';
 import 'package:meshlink_app/identity/device_identity.dart';
 import 'package:meshlink_app/identity/encryption_identity.dart';
 import 'package:meshlink_app/identity/secure_storage.dart';
 import 'package:meshlink_app/identity/token_storage.dart';
+
+import 'helpers/friend_fakes.dart';
 
 const _config = BackendConfig(
     baseUrl: 'http://test', eventId: 'evt-1', anonKey: 'anon-test');
@@ -177,18 +181,37 @@ void main() {
       expect(restored.session!.username, 'ada');
     });
 
-    test('logout clears the session and attestation token', () async {
+    test('logout clears session, token, and persisted friend data', () async {
       final storage = _FakeStorage();
       final mock = _loginMock();
       await TokenStorage(storage).write(AttestationToken(
           token: 'att', expiresAt: DateTime.fromMillisecondsSinceEpoch(0)));
       final auth = await build(mock, storage);
+      final phone = await FakePhone.createWithStorage(
+          InMemorySecureStorage(), <String, Map<String, String>>{},
+          init: false);
+      await phone.createAccount('ada');
+      await phone.friends.store.put(FriendEntry(
+        record: FriendshipRecord(
+          peerUsername: 'bob',
+          peerCurve25519Pub: _pub(),
+          peerEd25519Pub: _pub(),
+          state: FriendshipState.friends,
+        ),
+      ));
+      auth.attachFriends(phone.friends);
       await auth.login(email: 'a@x.com', password: 'password123');
       await auth.logout();
       expect(auth.isLoggedIn, isFalse);
       expect(await SessionStorage(storage).read(), isNull);
-      // logout clears the attestation token too (spec: session + token only)
       expect(await TokenStorage(storage).read(), isNull);
+      expect(phone.friends.store.ownUsername, isNull);
+      expect(phone.friends.store.entries, isEmpty);
+      final reloaded = FriendStore(phone.storage);
+      await reloaded.load();
+      expect(reloaded.ownUsername, isNull);
+      expect(reloaded.entries, isEmpty);
+      phone.friends.dispose();
     });
 
     test('validAccessToken rotates when the access token is expired', () async {

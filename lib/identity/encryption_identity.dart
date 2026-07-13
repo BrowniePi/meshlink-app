@@ -12,7 +12,7 @@ const String _x25519StorageKey = 'meshlink_encryption_seed_v1';
 /// from the Ed25519 signing identity ([DeviceIdentity]). Kept separate
 /// because package:cryptography cannot do libsodium's Ed25519→Curve25519
 /// birational conversion — so both public keys are registered at
-/// POST /account and travel in friend payloads. Same Keychain/Keystore
+/// Supabase signup and travel in friend payloads. Same Keychain/Keystore
 /// storage as the signing seed; no second key store.
 class EncryptionIdentity {
   EncryptionIdentity._(this.keyPair, this.publicKey);

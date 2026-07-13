@@ -368,9 +368,12 @@ class FireflyController extends ChangeNotifier {
   String detailOf(String username) {
     final entry = friends.store.byUsername(username);
     if (entry == null) return '';
-    if (entry.theirTokenToMe == null) return 'not sharing their location';
     final p = positions[username];
-    if (p == null) return 'sharing · asking the node…';
+    if (p == null) {
+      if (friends.canReachBackend) return 'checking last known location…';
+      if (entry.theirTokenToMe == null) return 'not sharing their location';
+      return 'sharing · asking the node…';
+    }
     final d = distanceM(username);
     final b = bearing(username);
     final age = p.ageS < 120 ? '${p.ageS}s ago' : '${p.ageS ~/ 60}m ago';
@@ -400,7 +403,7 @@ class FireflyController extends ChangeNotifier {
       final username = entry.record.peerUsername;
       // A capability token gates the mesh path only; online, the friend's
       // sealed blob (or its absence) is the consent check.
-      if ((entry.theirTokenToMe == null && !friends.isOnline) ||
+      if ((entry.theirTokenToMe == null && !friends.canReachBackend) ||
           !isVisible(username)) {
         continue;
       }

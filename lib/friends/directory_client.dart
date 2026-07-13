@@ -51,30 +51,6 @@ class DirectoryClient {
         'Authorization': 'Bearer ${bearer ?? config.anonKey}',
       };
 
-  /// Directory rows are created by the signup trigger now; this legacy
-  /// registration path only surfaces a taken name early (test harness /
-  /// directory-only flows).
-  Future<void> createAccount({
-    required String username,
-    required Uint8List curve25519Pub,
-    required Uint8List ed25519Pub,
-  }) async {
-    final http.Response response;
-    try {
-      response = await _client.post(
-        _uri('/rest/v1/rpc/username_available'),
-        headers: _headers(),
-        body: jsonEncode({'name': username}),
-      );
-    } catch (e) {
-      throw DirectoryException('Backend unreachable: $e');
-    }
-    if (response.statusCode == 200 && response.body.trim() == 'false') {
-      throw const DirectoryException('That username is taken',
-          usernameTaken: true);
-    }
-  }
-
   /// Resolve a username to its public keys. The caller pins these locally
   /// (TOFU) — later lookups never overwrite.
   Future<DirectoryEntry> resolve(String username) async {

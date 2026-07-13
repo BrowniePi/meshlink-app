@@ -83,8 +83,7 @@ class FriendEntry {
 }
 
 /// Friends persistence: one JSON blob in the existing Keychain/Keystore
-/// secure storage (no second key store). The phone is the authoritative home
-/// of friendship/consent state — the backend only mirrors it.
+/// secure storage (no second key store).
 class FriendStore {
   FriendStore(this._storage);
 
@@ -150,9 +149,22 @@ class FriendStore {
     await _storage.write(_usernameKey, username);
   }
 
+  /// Remove all account-scoped data while leaving device keypairs intact.
+  Future<void> clear() async {
+    _ownUsername = null;
+    _entries.clear();
+    await _storage.delete(_usernameKey);
+    await _storage.delete(_key);
+  }
+
   /// Insert or replace the entry for its username and persist everything.
   Future<void> put(FriendEntry entry) async {
     _entries[entry.record.peerUsername] = entry;
+    await _persist();
+  }
+
+  Future<void> remove(String username) async {
+    _entries.remove(username);
     await _persist();
   }
 

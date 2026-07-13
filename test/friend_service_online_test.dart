@@ -22,12 +22,14 @@ void main() {
   late FakePhone bob;
   late OnlineService aliceOnline;
   late OnlineService bobOnline;
+  late bool backendFallback;
 
   OnlineService wireOnline(FakePhone phone, String username) {
     final service = OnlineService(
       client: OnlineClient(
         config: const BackendConfig(baseUrl: 'http://test', eventId: 'test'),
         accessToken: () async => username,
+        fallbackAvailable: () => backendFallback,
         client: backend.mockClient(registry),
       ),
       accessToken: () async => username,
@@ -41,10 +43,11 @@ void main() {
   setUp(() async {
     registry = {};
     backend = FakeOnlineBackend();
+    backendFallback = true;
     alice = await FakePhone.create(registry);
     bob = await FakePhone.create(registry);
-    await alice.friends.createAccount('alice');
-    await bob.friends.createAccount('bob');
+    await alice.createAccount('alice');
+    await bob.createAccount('bob');
     aliceOnline = wireOnline(alice, 'alice');
     bobOnline = wireOnline(bob, 'bob');
   });
@@ -87,6 +90,56 @@ void main() {
     expect(bob.friends.friends.single.record.locationSharingEnabled, isFalse);
   });
 
+  test('friendship changes use the backend fallback without internet',
+      () async {
+    aliceOnline.debugSetConnected(false);
+    bobOnline.debugSetConnected(false);
+
+    expect(alice.friends.isOnline, isFalse);
+    expect(alice.friends.canReachBackend, isTrue);
+    expect(await alice.friends.sendFriendRequest('bob'), 1);
+    await bobOnline.pollNow();
+    expect(bob.friends.receivedRequests.single.record.peerUsername, 'alice');
+
+    await bob.friends.accept('alice');
+    await aliceOnline.pollNow();
+    expect(alice.friends.friends.single.record.peerUsername, 'bob');
+    expect(bob.friends.friends.single.record.peerUsername, 'alice');
+  });
+
+  test('online poll restores a Supabase friendship missing locally', () async {
+    backend.friendships[backend.pairForTest('alice', 'bob')] = 'friends';
+
+    await aliceOnline.pollNow();
+
+    expect(alice.friends.friends.single.record.peerUsername, 'bob');
+  });
+
+  test('online poll removes a local friendship absent from Supabase',
+      () async {
+    await befriendOnline();
+    backend.friendships.clear();
+
+    await aliceOnline.pollNow();
+
+    expect(alice.friends.friends, isEmpty);
+    expect(alice.friends.store.byUsername('bob'), isNull);
+  });
+
+  test('clearing account data removes memory and persisted friend state',
+      () async {
+    await befriendOnline();
+
+    await alice.friends.clearAccountData();
+    final reloaded = FriendStore(alice.storage);
+    await reloaded.load();
+
+    expect(alice.friends.store.ownUsername, isNull);
+    expect(alice.friends.store.entries, isEmpty);
+    expect(reloaded.ownUsername, isNull);
+    expect(reloaded.entries, isEmpty);
+  });
+
   test('decline over the backend lands as a decline, not silence', () async {
     await alice.friends.sendFriendRequest('bob');
     await bobOnline.pollNow();
@@ -101,6 +154,7 @@ void main() {
 
   test('a mesh-only outbound request is NOT misread as declined', () async {
     // Alice sends while offline → mesh path.
+    backendFallback = false;
     aliceOnline.debugSetConnected(false);
     await alice.friends.sendFriendRequest('bob');
     expect(backend.pendingFor('bob'), isEmpty);
@@ -157,9 +211,7 @@ void main() {
     await befriendOnline();
     bob.position = (lat: 18.945, lon: 72.835, accuracyM: 8.0);
     await bob.friends.enableLocationSharing('alice');
-    // The toggle fires the upload without blocking the UI; the beacon
-    // cadence is the deterministic hook.
-    await bob.friends.sendBeacon();
+    // The toggle does not complete until the initial blob is uploaded.
     // One blob, for alice only, and it is not plaintext.
     expect(backend.locationBlobs['bob']!.keys, ['alice']);
 
@@ -170,16 +222,39 @@ void main() {
     // Came from the blob, not a mesh query (alice holds no token and
     // sprayed nothing).
     expect(alice.friends.store.byUsername('bob')!.theirTokenToMe, isNull);
+
+    // A rate-limited refresh still returns the last available fix.
+    bob.position = null;
+    final last = await alice.friends.queryFriendLocation('bob');
+    expect(last, isNotNull);
+    expect(last!.latMicrodeg, 18945000);
+  });
+
+  test('a new share uploads the last fix when fresh GPS is unavailable',
+      () async {
+    await befriendOnline();
+    bob.position = (lat: 18.945, lon: 72.835, accuracyM: 8.0);
+    await bob.friends.sendBeacon(); // remembers the device's last fix
+    bob.position = null;
+
+    await bob.friends.enableLocationSharing('alice');
+
+    final fix = await alice.friends.queryFriendLocation('bob');
+    expect(fix, isNotNull);
+    expect(fix!.latMicrodeg, 18945000);
+    expect(fix.lonMicrodeg, 72835000);
   });
 
   test('disabling sharing revokes the blob server-side', () async {
     await befriendOnline();
     bob.position = (lat: 18.945, lon: 72.835, accuracyM: 8.0);
     await bob.friends.enableLocationSharing('alice');
-    await bob.friends.sendBeacon();
+    await aliceOnline.pollNow();
+    expect(alice.friends.store.byUsername('bob')!.theirTokenToMe, isNotNull);
     await bob.friends.disableLocationSharing('alice');
-    await bob.friends.sendBeacon(); // uploads the now-empty set
     expect(backend.locationBlobs['bob'] ?? const {}, isEmpty);
+    await aliceOnline.pollNow();
+    expect(alice.friends.store.byUsername('bob')!.theirTokenToMe, isNull);
 
     final fix = await alice.friends.queryFriendLocation('bob');
     expect(fix, isNull); // uniformly unavailable
@@ -222,6 +297,8 @@ class FakeOnlineBackend {
 
   String _pair(String a, String b) =>
       a.compareTo(b) <= 0 ? '$a|$b' : '$b|$a';
+
+  String pairForTest(String a, String b) => _pair(a, b);
 
   MockClient mockClient(Map<String, Map<String, String>> registry) {
     return MockClient((request) async {

@@ -64,8 +64,8 @@ are gone.
 Point a build at your project:
 ```
 flutter run \
-  --dart-define=MESHLINK_BACKEND_URL=https://<project-ref>.supabase.co \
-  --dart-define=MESHLINK_SUPABASE_ANON_KEY=<anon key> \
+  --dart-define=MESHLINK_BACKEND_URL=https://ncemrwmjlcbciamdpsmw.supabase.co \
+  --dart-define=MESHLINK_SUPABASE_ANON_KEY=sb_publishable_F4yAtunLatu-zGtLABusJA_4CWpESTC \
   --dart-define=MESHLINK_EVENT_ID=meshlink-demo
 ```
 

@@ -9,7 +9,6 @@ import 'package:meshlink_app/friends/friend_state.dart';
 import 'package:meshlink_app/friends/friend_store.dart';
 import 'package:meshlink_app/identity/device_identity.dart';
 import 'package:meshlink_app/identity/encryption_identity.dart';
-import 'package:meshlink_app/onboarding/account_screen.dart';
 import 'package:meshlink_app/ui/direct_message_screen.dart';
 import 'package:meshlink_app/ui/friend_map_screen.dart';
 import 'package:meshlink_app/ui/friends_screen.dart';
@@ -49,7 +48,7 @@ void main() {
     // still pending when the body ends.
     me = await FakePhone.create(registry, init: false);
     peer = await FakePhone.create(registry, init: false);
-    await peer.friends.createAccount('alice');
+    await peer.createAccount('alice');
   });
 
   tearDown(() {
@@ -58,7 +57,7 @@ void main() {
   });
 
   Future<FriendEntry> seedEntry(FriendshipState state) async {
-    await me.friends.createAccount('bob');
+    await me.createAccount('bob');
     final entry = FriendEntry(
       record: FriendshipRecord(
         peerUsername: 'alice',
@@ -71,38 +70,19 @@ void main() {
     return entry;
   }
 
-  group('flow 1 — create account', () {
-    testWidgets('registers the username and moves on', (tester) async {
-      var done = false;
-      await tester.pumpWidget(MaterialApp(
-        home: AccountScreen(friends: me.friends, onDone: () => done = true),
-      ));
-      await tester.enterText(find.byType(TextField), 'bob');
-      await tester.tap(find.text('Create account'));
-      // pump, not pumpAndSettle: the button's progress spinner animates
-      // indefinitely while the screen stays mounted after onDone.
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
-      expect(done, isTrue);
-      expect(registry.containsKey('bob'), isTrue);
-      expect(me.friends.hasAccount, isTrue);
-    });
-
-    testWidgets('a taken username shows an inline error, no navigation',
-        (tester) async {
-      var done = false;
-      await tester.pumpWidget(MaterialApp(
-        home: AccountScreen(friends: me.friends, onDone: () => done = true),
-      ));
-      await tester.enterText(find.byType(TextField), 'alice'); // peer's name
-      await tester.tap(find.text('Create account'));
-      await tester.pumpAndSettle();
-      expect(done, isFalse);
-      expect(find.text('That username is taken'), findsOneWidget);
-    });
-  });
-
   group('flow 2 — friend request / accept (mutual consent)', () {
+    testWidgets('sent and received requests are shown separately',
+        (tester) async {
+      await seedEntry(FriendshipState.requested);
+      await tester.pumpWidget(
+          MaterialApp(home: FriendsScreen(friends: me.friends)));
+      await tester.pump();
+
+      expect(find.text('Sent requests'), findsOneWidget);
+      expect(find.text('awaiting response'), findsOneWidget);
+      expect(find.text('Received requests'), findsNothing);
+    });
+
     testWidgets('an inbound request needs an explicit Accept', (tester) async {
       await seedEntry(FriendshipState.pending);
       await tester.pumpWidget(

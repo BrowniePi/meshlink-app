@@ -42,6 +42,11 @@ class _FriendMapScreenState extends State<FriendMapScreen> {
     // fresher one lands in the service's lastKnownLocation afterwards and
     // arrives here through this listener.
     widget.friends.addListener(_onFreshLocation);
+    _last = widget.friends.lastKnownLocation[widget.username];
+    if (_last != null) {
+      _lastAt = DateTime.now();
+      _everTried = true;
+    }
     _query();
     _poll = Timer.periodic(const Duration(seconds: 60), (_) => _query());
   }

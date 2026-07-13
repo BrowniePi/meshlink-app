@@ -103,6 +103,10 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
   /// Whether the backend channel is usable right now (the mode indicator).
   bool get isOnline => _online?.connected ?? false;
 
+  /// Authenticated REST can also travel through a connected node to the
+  /// venue-local backend while the phone itself has no internet.
+  bool get canReachBackend => _online?.canRequest ?? false;
+
   late final Uint8List _ephemId;
   Timer? _beaconTimer;
   Timer? _refreshTimer;
@@ -127,6 +131,10 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
   /// contract the node enforces per (requester, target).
   final Map<String, DateTime> _lastAnsweredAt = {};
 
+  /// Most recent fix obtained on this device. Used for online sharing when a
+  /// fresh GPS read temporarily fails; its original age is preserved.
+  ({double lat, double lon, double accuracyM, DateTime at})? _lastOwnPosition;
+
   Uint8List get _myHint => pubkeyId(identity.publicKey);
 
   // ---- lifecycle ----
@@ -146,29 +154,28 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     super.dispose();
   }
 
-  // ---- flow 1: account (username registration) ----
-
-  bool get hasAccount => store.ownUsername != null;
-
-  /// Direct directory registration (POST /account) — used by the test harness
-  /// and any directory-only path. The production flow goes through
-  /// /auth/signup instead and calls [bindAccount].
-  Future<void> createAccount(String username) async {
-    await directory.createAccount(
-      username: username,
-      curve25519Pub: encryption.publicKey,
-      ed25519Pub: identity.publicKey,
-    );
+  /// Record the account's mesh handle after Supabase auth. The signup trigger
+  /// already created the directory row; login rebinds this device's keys.
+  Future<void> bindAccount(String username) async {
     await store.setOwnUsername(username);
     notifyListeners();
   }
 
-  /// Record the account's mesh handle after auth. The directory row was
-  /// already created by POST /auth/signup, so this only sets the local
-  /// username — it must NOT re-POST /account (that would 409 on the taken
-  /// name). Login rebinds the device keys server-side.
-  Future<void> bindAccount(String username) async {
-    await store.setOwnUsername(username);
+  /// Clear friendship state belonging to the signed-out account. Device
+  /// identities are deliberately owned elsewhere and survive logout.
+  Future<void> clearAccountData() async {
+    await store.clear();
+    _lastQueryAt.clear();
+    for (final query in _pendingQueries.values) {
+      if (!query.isCompleted) query.complete(null);
+    }
+    _pendingQueries.clear();
+    _lastRequestSentAt.clear();
+    lastKnownLocation.clear();
+    _lastFixAt.clear();
+    _lastAnsweredAt.clear();
+    _lastOwnPosition = null;
+    _syncBeaconLoop();
     notifyListeners();
   }
 
@@ -185,8 +192,24 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
   /// the caller should say so rather than claim it was delivered.
   Future<int> sendFriendRequest(String username) async {
     final existing = store.byUsername(username);
-    if (existing != null && existing.record.state != FriendshipState.none) {
-      throw DirectoryException('Already have a "$username" entry');
+    if (existing != null) {
+      if (existing.record.state == FriendshipState.requested) {
+        if (existing.requestSentOnline && canReachBackend) return 1;
+        if (await _sendRequestOnline(existing)) {
+          await store.put(existing);
+          return 1;
+        }
+        return _sprayRequest(existing.record);
+      }
+      if (existing.record.state == FriendshipState.friends) {
+        throw DirectoryException('You are already friends with @$username');
+      }
+      if (existing.record.state == FriendshipState.pending) {
+        throw DirectoryException('@$username already sent you a request');
+      }
+      if (existing.record.state == FriendshipState.revoked) {
+        throw DirectoryException('Friendship with @$username was revoked');
+      }
     }
     final resolved = await directory.resolve(username);
     final record = FriendshipRecord(
@@ -213,7 +236,7 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
   /// server now holds it — no re-sends needed); false offline or on error.
   Future<bool> _sendRequestOnline(FriendEntry entry) async {
     final online = _online;
-    if (online == null || !online.connected) return false;
+    if (online == null || !online.canRequest) return false;
     try {
       await online.client.sendFriendRequest(entry.record.peerUsername);
       entry.requestSentOnline = true;
@@ -237,7 +260,7 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
         _lastRequestSentAt[entry.record.peerUsername] = _now();
         continue;
       }
-      if (entry.requestSentOnline && isOnline) continue; // server holds it
+      if (entry.requestSentOnline && canReachBackend) continue; // server holds it
       final last = _lastRequestSentAt[entry.record.peerUsername];
       if (last != null && _now().difference(last) < requestResendInterval) {
         continue;
@@ -258,10 +281,19 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
   }
 
   /// Inbound requests awaiting our explicit consent. Never auto-accepted.
-  List<FriendEntry> get pendingRequests => [
+  List<FriendEntry> get receivedRequests => [
         for (final e in store.entries)
           if (e.record.state == FriendshipState.pending) e
       ];
+
+  /// Outbound requests awaiting the other person's response.
+  List<FriendEntry> get sentRequests => [
+        for (final e in store.entries)
+          if (e.record.state == FriendshipState.requested) e
+      ];
+
+  /// Backwards-compatible name used by request badges and older screens.
+  List<FriendEntry> get pendingRequests => receivedRequests;
 
   List<FriendEntry> get friends => [
         for (final e in store.entries)
@@ -299,7 +331,7 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     // the online paths below (message relay requires it).
     await _mirror(record);
     final online = _online;
-    if (online != null && online.connected) {
+    if (online != null && online.canRequest) {
       try {
         await online.client.acceptFriendRequest(username);
       } on OnlineException catch (e) {
@@ -332,7 +364,7 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     await _sendToPeers(msgTypeFriendDecline,
         encodeFriendDecline(msgId, pubkeyId(entry.record.peerEd25519Pub)));
     final online = _online;
-    if (online != null && online.connected) {
+    if (online != null && online.canRequest) {
       try {
         await online.client.declineFriendRequest(username);
       } on OnlineException catch (e) {
@@ -358,12 +390,12 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     assert(effects.contains(FriendEffect.issueCapabilityToken));
     entry.record = record;
     entry.myTokenToThem = await _mintToken(record);
-    await _deliverToken(entry);
     await store.put(entry);
     _syncBeaconLoop();
-    unawaited(_mirror(record));
-    unawaited(_uploadLocationBlobs());
     notifyListeners();
+    await _mirror(record);
+    await _deliverToken(entry);
+    await _uploadLocationBlobs();
   }
 
   /// Disable: send LOCATION_REVOKE (to the node's revocation set AND to the
@@ -374,26 +406,37 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     final (record, effects) =
         transition(entry.record, FriendEvent.disableLocation);
     final token = entry.myTokenToThem;
+    Uint8List? revokePayload;
     if (effects.contains(FriendEffect.emitLocationRevoke) && token != null) {
       final parsed = parseToken(token);
-      await _sendToPeers(
-          msgTypeLocationRevoke,
-          encodeLocationRevoke(
-            issuerPubkeyId: parsed.issuerPubkeyId,
-            granteePubkeyId: parsed.granteePubkeyId,
-            issuedAt: parsed.issuedAt,
-            nonce: parsed.nonce,
-          ));
+      revokePayload = encodeLocationRevoke(
+        issuerPubkeyId: parsed.issuerPubkeyId,
+        granteePubkeyId: parsed.granteePubkeyId,
+        issuedAt: parsed.issuedAt,
+        nonce: parsed.nonce,
+      );
     }
     entry.record = record;
     entry.myTokenToThem = null;
     await store.put(entry);
     _syncBeaconLoop();
-    unawaited(_mirror(record));
+    notifyListeners();
+    await _mirror(record);
+    if (revokePayload != null) {
+      await _sendToPeers(msgTypeLocationRevoke, revokePayload);
+      final online = _online;
+      if (online != null && online.canRequest) {
+        try {
+          await online.client.sendRelay(username,
+              Uint8List.fromList([msgTypeLocationRevoke, ...revokePayload]));
+        } on OnlineException catch (e) {
+          _log('online location revoke failed: $e');
+        }
+      }
+    }
     // Re-upload without this friend — replacing the whole blob set IS the
     // online revoke.
-    unawaited(_uploadLocationBlobs());
-    notifyListeners();
+    await _uploadLocationBlobs();
   }
 
   // ---- flow 5: direct messages ----
@@ -421,7 +464,7 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     notifyListeners();
     final online = _online;
     var sent = false;
-    if (online != null && online.connected) {
+    if (online != null && online.canRequest) {
       try {
         await online.client.sendRelay(username,
             Uint8List.fromList([msgTypeDirectMessage, ...payload]));
@@ -455,7 +498,7 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
 
     final last = _lastQueryAt[username];
     if (last != null && _now().difference(last) < queryMinInterval) {
-      return null; // respect the node's rate limit; UI keeps last-known
+      return lastKnownLocation[username];
     }
     _lastQueryAt[username] = _now();
 
@@ -463,7 +506,7 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     if (onlineResult != null) return onlineResult;
 
     final token = entry.theirTokenToMe;
-    if (token == null) return null;
+    if (token == null) return lastKnownLocation[username];
     final completer = Completer<LocationResponsePayload?>();
     _pendingQueries[username] = completer;
     await _sendToPeers(msgTypeLocationQuery, encodeLocationQuery(token));
@@ -472,7 +515,7 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     final result = await completer.future
         .timeout(const Duration(seconds: 10), onTimeout: () => null);
     _pendingQueries.remove(username);
-    return result;
+    return result ?? lastKnownLocation[username];
   }
 
   /// Fetch and open the sealed location blob [entry]'s friend uploaded for
@@ -481,7 +524,7 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
   Future<LocationResponsePayload?> _queryLocationOnline(
       FriendEntry entry) async {
     final online = _online;
-    if (online == null || !online.connected) return null;
+    if (online == null || !online.canRequest) return null;
     final username = entry.record.peerUsername;
     try {
       final blob = await online.client.getLocationBlob(username);
@@ -496,13 +539,14 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
       }
       // Staleness comes from the server's updated_at, not the sealed body
       // (the blob was fresh when uploaded).
-      final ageS = _now().difference(blob.updatedAt).inSeconds;
+      final serverAgeS = _now().difference(blob.updatedAt).inSeconds;
+      final ageS = payload.beaconAgeS + (serverAgeS < 0 ? 0 : serverAgeS);
       final aged = LocationResponsePayload(
         targetPubkeyId: payload.targetPubkeyId,
         latMicrodeg: payload.latMicrodeg,
         lonMicrodeg: payload.lonMicrodeg,
         accuracyM: payload.accuracyM,
-        beaconAgeS: ageS < 0 ? 0 : ageS,
+        beaconAgeS: ageS,
         zoneId: payload.zoneId,
       );
       _recordLocation(username, aged);
@@ -779,11 +823,18 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
         _tryTransition(entry.record, FriendEvent.recvRevoke);
     if (next == null) return true;
     if (effects!.contains(FriendEffect.peerStoppedSharing)) {
-      entry.theirTokenToMe = null;
-      await store.put(entry);
-      notifyListeners();
+      await _forgetPeerLocation(entry);
     }
     return true;
+  }
+
+  Future<void> _forgetPeerLocation(FriendEntry entry) async {
+    final username = entry.record.peerUsername;
+    entry.theirTokenToMe = null;
+    lastKnownLocation.remove(username);
+    _lastFixAt.remove(username);
+    await store.put(entry);
+    notifyListeners();
   }
 
   // ---- inbound online path (fed by OnlineService) ----
@@ -842,6 +893,12 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
         await store.put(entry);
         unawaited(_mirror(next));
         notifyListeners();
+      case msgTypeLocationRevoke:
+        final entry = store.byUsername(fromUser);
+        if (entry == null || entry.record.state != FriendshipState.friends) {
+          return;
+        }
+        await _forgetPeerLocation(entry);
       default:
         _log('online relay with unknown type ${body[0]} — dropped');
     }
@@ -853,7 +910,7 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
   Future<void> onFriendEvent() async {
     final online = _online;
     final me = store.ownUsername;
-    if (online == null || !online.connected || me == null) return;
+    if (online == null || !online.canRequest || me == null) return;
     final PendingRequests pending;
     try {
       pending = await online.client.pendingFriendRequests();
@@ -888,6 +945,34 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
       notifyListeners();
     }
 
+    // Supabase is the durable social graph. Reconcile every row on every
+    // poll so a fresh install/login can recover friends and changes made by
+    // another device do not leave stale local state behind.
+    final Map<String, String> states;
+    try {
+      states = await online.client.friendshipStates(me);
+    } on OnlineException catch (e) {
+      _log('friendship-state sync failed: $e');
+      return;
+    }
+    for (final state in states.entries) {
+      await _applyOnlineFriendshipState(state.key, state.value);
+    }
+    final stale = [
+      for (final entry in store.entries)
+        if ((entry.record.state == FriendshipState.friends ||
+                entry.record.state == FriendshipState.revoked) &&
+            !states.containsKey(entry.record.peerUsername))
+          entry.record.peerUsername,
+    ];
+    for (final username in stale) {
+      await store.remove(username);
+      lastKnownLocation.remove(username);
+      _lastFixAt.remove(username);
+      notifyListeners();
+    }
+    if (stale.isNotEmpty) _syncBeaconLoop();
+
     // Outbound: a request we delivered online that is no longer pending was
     // answered — friends in the mirror means accepted, otherwise declined.
     // (Requests never delivered online say nothing here; the mesh answer
@@ -900,14 +985,6 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
             !stillPending.contains(e.record.peerUsername))
           e
     ];
-    if (answered.isEmpty) return;
-    final Map<String, String> states;
-    try {
-      states = await online.client.friendshipStates(me);
-    } on OnlineException catch (e) {
-      _log('friendship-state sync failed: $e');
-      return;
-    }
     for (final entry in answered) {
       final username = entry.record.peerUsername;
       final event = states[username] == 'friends'
@@ -919,6 +996,53 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
       await store.put(entry);
       notifyListeners();
     }
+  }
+
+  Future<void> _applyOnlineFriendshipState(
+      String username, String serverState) async {
+    final state = switch (serverState) {
+      'friends' => FriendshipState.friends,
+      'revoked' => FriendshipState.revoked,
+      _ => null,
+    };
+    if (state == null) return;
+
+    var entry = store.byUsername(username);
+    if (entry == null) {
+      if (state != FriendshipState.friends) return;
+      final DirectoryEntry resolved;
+      try {
+        resolved = await directory.resolve(username);
+      } on DirectoryException catch (e) {
+        _log('cannot recover online friend $username: $e');
+        return;
+      }
+      entry = FriendEntry(
+        record: FriendshipRecord(
+          peerUsername: resolved.username,
+          peerCurve25519Pub: resolved.curve25519Pub,
+          peerEd25519Pub: resolved.ed25519Pub,
+          state: state,
+        ),
+      );
+    } else if (entry.record.state == state) {
+      return;
+    } else {
+      entry.record = entry.record.copyWith(
+        state: state,
+        locationSharingEnabled:
+            state == FriendshipState.friends ? null : false,
+      );
+      if (state != FriendshipState.friends) {
+        entry.myTokenToThem = null;
+        entry.theirTokenToMe = null;
+      }
+      entry.pendingRequestMsgId = null;
+      entry.requestSentOnline = false;
+    }
+    await store.put(entry);
+    _syncBeaconLoop();
+    notifyListeners();
   }
 
   // ---- internals ----
@@ -951,7 +1075,7 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     // Same sealed payload through the online relay, so a grant/refresh
     // reaches a friend we never meet on the mesh.
     final online = _online;
-    if (online != null && online.connected) {
+    if (online != null && online.canRequest) {
       try {
         await online.client.sendRelay(entry.record.peerUsername,
             Uint8List.fromList([msgTypeFriendAccept, ...payload]));
@@ -995,7 +1119,16 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
   @visibleForTesting
   Future<void> sendBeacon() async {
     final position = await _readPosition();
-    if (position == null) return;
+    if (position == null) {
+      await _uploadLocationBlobs(useCachedOnly: true);
+      return;
+    }
+    _lastOwnPosition = (
+      lat: position.lat,
+      lon: position.lon,
+      accuracyM: position.accuracyM,
+      at: _now(),
+    );
     await _sendToPeers(
       msgTypeLocation,
       encodeLocationBeacon(
@@ -1013,17 +1146,50 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
   /// one coordinate sealed per friend (the server can't read them). An empty
   /// set is uploaded even without a GPS fix: that IS the online revoke.
   Future<void> _uploadLocationBlobs(
-      {({double lat, double lon, double accuracyM})? position}) async {
+      {({double lat, double lon, double accuracyM})? position,
+      bool useCachedOnly = false}) async {
     final online = _online;
-    if (online == null || !online.connected) return;
+    if (online == null || !online.canRequest) return;
     final sharing = [
       for (final e in store.entries)
         if (e.record.locationSharingEnabled) e
     ];
     final blobs = <String, Uint8List>{};
     if (sharing.isNotEmpty) {
-      position ??= await _readPosition();
-      if (position == null) return; // no fix — keep whatever is up there
+      if (position != null) {
+        _lastOwnPosition = (
+          lat: position.lat,
+          lon: position.lon,
+          accuracyM: position.accuracyM,
+          at: _now(),
+        );
+      } else if (!useCachedOnly) {
+        position = await _readPosition();
+        if (position != null) {
+          _lastOwnPosition = (
+            lat: position.lat,
+            lon: position.lon,
+            accuracyM: position.accuracyM,
+            at: _now(),
+          );
+        }
+      }
+      final cached = _lastOwnPosition;
+      if (position == null && cached != null) {
+        position = (
+          lat: cached.lat,
+          lon: cached.lon,
+          accuracyM: cached.accuracyM,
+        );
+      }
+      if (position == null) return; // no current or last-known fix
+      final ageS = cached == null
+          ? 0
+          : _now()
+              .difference(cached.at)
+              .inSeconds
+              .clamp(0, 0xFFFFFFFF)
+              .toInt();
       for (final entry in sharing) {
         blobs[entry.record.peerUsername] = await encodeLocationResponse(
           LocationResponsePayload(
@@ -1031,7 +1197,7 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
             latMicrodeg: (position.lat * 1e6).round(),
             lonMicrodeg: (position.lon * 1e6).round(),
             accuracyM: position.accuracyM.round().clamp(0, 0xFFFF),
-            beaconAgeS: 0, // fresh at upload; age derives from updated_at
+            beaconAgeS: ageS,
             zoneId: broadcastZone,
           ),
           pubkeyId(entry.record.peerEd25519Pub),

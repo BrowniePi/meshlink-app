@@ -1,8 +1,5 @@
-import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
 import 'package:meshlink_app/config/backend_config.dart';
 import 'package:meshlink_app/core/pipeline.dart';
 import 'package:meshlink_app/friends/directory_client.dart';
@@ -59,35 +56,68 @@ class CapturingTransport implements Transport {
   }
 }
 
-/// Shared fake backend: POST /account registers into [registry], GET
-/// /directory/{u} resolves from it, POST /friendships is accepted silently.
-MockClient directoryMockClient(Map<String, Map<String, String>> registry) {
-  return MockClient((request) async {
-    if (request.method == 'POST' && request.url.path == '/account') {
-      final body = jsonDecode(request.body) as Map<String, dynamic>;
-      final username = body['username'] as String;
-      if (registry.containsKey(username)) {
-        return http.Response('{"detail":"taken"}', 409);
-      }
-      registry[username] = {
-        'username': username,
-        'curve25519_pub': body['curve25519_pub'] as String,
-        'ed25519_pub': body['ed25519_pub'] as String,
-      };
-      return http.Response('{}', 201);
+/// Shared fake directory backed by [registry] directly — the production
+/// registration path is the Supabase signup trigger, so the test harness
+/// registers keys in-memory instead of over a wire protocol.
+class FakeDirectoryClient extends DirectoryClient {
+  FakeDirectoryClient(this.registry)
+      : super(
+          config: const BackendConfig(baseUrl: 'http://test', eventId: 'test'),
+        );
+
+  final Map<String, Map<String, String>> registry;
+
+  @override
+  Future<void> createAccount({
+    required String username,
+    required Uint8List curve25519Pub,
+    required Uint8List ed25519Pub,
+  }) async {
+    if (registry.containsKey(username)) {
+      throw const DirectoryException('That username is taken',
+          usernameTaken: true);
     }
-    if (request.method == 'GET' &&
-        request.url.path.startsWith('/directory/')) {
-      final username = request.url.pathSegments.last;
-      final entry = registry[username];
-      if (entry == null) return http.Response('{"detail":"unknown"}', 404);
-      return http.Response(jsonEncode(entry), 200);
+    registry[username] = {
+      'username': username,
+      'curve25519_pub': _hex(curve25519Pub),
+      'ed25519_pub': _hex(ed25519Pub),
+    };
+  }
+
+  @override
+  Future<DirectoryEntry> resolve(String username) async {
+    final entry = registry[username];
+    if (entry == null) {
+      throw DirectoryException('No user named "$username"', notFound: true);
     }
-    if (request.method == 'POST' && request.url.path == '/friendships') {
-      return http.Response('{}', 200);
-    }
-    return http.Response('not found', 404);
-  });
+    return DirectoryEntry(
+      entry['username']!,
+      _unhex(entry['curve25519_pub']!),
+      _unhex(entry['ed25519_pub']!),
+    );
+  }
+
+  @override
+  Future<void> mirrorFriendship({
+    required String userA,
+    required String userB,
+    required String state,
+    required bool aSharesLoc,
+    required bool bSharesLoc,
+  }) async {
+    // Accepted silently, like the best-effort production mirror.
+  }
+}
+
+String _hex(Uint8List bytes) =>
+    bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+Uint8List _unhex(String hex) {
+  final out = Uint8List(hex.length ~/ 2);
+  for (var i = 0; i < out.length; i++) {
+    out[i] = int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
+  }
+  return out;
 }
 
 /// One phone: identity + friend stack wired to in-memory fakes.
@@ -126,10 +156,7 @@ class FakePhone {
     late final FakePhone phone;
     final friends = FriendService(
       store: FriendStore(storage),
-      directory: DirectoryClient(
-        config: const BackendConfig(baseUrl: 'http://test', eventId: 'test'),
-        client: directoryMockClient(registry),
-      ),
+      directory: FakeDirectoryClient(registry),
       identity: identity,
       encryption: encryption,
       transport: transport,

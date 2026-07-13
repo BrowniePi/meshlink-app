@@ -52,8 +52,8 @@ class AttestationFlow {
   }
 
   Future<String> _createTicket(String buyerPubkey) async {
-    dbg.DebugLog.instance.log('attest', 'POST /tickets');
-    final response = await _post('/tickets', {
+    dbg.DebugLog.instance.log('attest', 'POST /functions/v1/tickets');
+    final response = await _post('/functions/v1/tickets', {
       'event_id': config.eventId,
       'buyer_pubkey': buyerPubkey,
     });
@@ -65,8 +65,8 @@ class AttestationFlow {
   Future<AttestationToken> _requestToken(
       String ticketId, String devicePubkey) async {
     dbg.DebugLog.instance
-        .log('attest', 'POST /attestation/token (ticket $ticketId)');
-    final response = await _post('/attestation/token', {
+        .log('attest', 'POST /functions/v1/attestation-token (ticket $ticketId)');
+    final response = await _post('/functions/v1/attestation-token', {
       'ticket_id': ticketId,
       'event_id': config.eventId,
       'device_pubkey': devicePubkey,
@@ -89,7 +89,11 @@ class AttestationFlow {
       response = await _client
           .post(
             Uri.parse('${config.baseUrl}$path'),
-            headers: {'Content-Type': 'application/json'},
+            headers: {
+              'Content-Type': 'application/json',
+              'apikey': config.anonKey,
+              'Authorization': 'Bearer ${config.anonKey}',
+            },
             body: jsonEncode(body),
           )
           .timeout(const Duration(seconds: 10));
@@ -114,7 +118,8 @@ class AttestationFlow {
   Map<String, dynamic> _decode(http.Response r) =>
       jsonDecode(r.body) as Map<String, dynamic>;
 
-  /// FastAPI returns `{"detail": "..."}` on error — surface it if present.
+  /// The Edge Functions return `{"detail": "..."}` on error (same shape the
+  /// FastAPI backend used) — surface it if present.
   String? _errorReason(http.Response r) {
     try {
       final detail = (jsonDecode(r.body) as Map<String, dynamic>)['detail'];

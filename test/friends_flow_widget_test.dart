@@ -2,10 +2,8 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:meshlink_app/config/backend_config.dart';
 import 'package:meshlink_app/core/friend_wire.dart';
 import 'package:meshlink_app/core/pipeline.dart';
-import 'package:meshlink_app/friends/directory_client.dart';
 import 'package:meshlink_app/friends/friend_service.dart';
 import 'package:meshlink_app/friends/friend_state.dart';
 import 'package:meshlink_app/friends/friend_store.dart';
@@ -165,10 +163,7 @@ void main() {
       final storage = InMemorySecureStorage();
       return _StubFriends(
         store: FriendStore(storage),
-        directory: DirectoryClient(
-          config: const BackendConfig(baseUrl: 'http://test', eventId: 't'),
-          client: directoryMockClient(registry),
-        ),
+        directory: FakeDirectoryClient(registry),
         identity: await DeviceIdentity.loadOrGenerate(storage),
         encryption: await EncryptionIdentity.loadOrGenerate(storage),
         transport: CapturingTransport(),

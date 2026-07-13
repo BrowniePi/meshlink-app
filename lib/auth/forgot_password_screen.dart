@@ -81,7 +81,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
             label: 'I have a reset code',
             onTap: () => Navigator.of(context).pushReplacement(
               MaterialPageRoute(
-                  builder: (_) => ResetPasswordScreen(auth: widget.auth)),
+                  builder: (_) => ResetPasswordScreen(
+                      auth: widget.auth, email: _email.text.trim())),
             ),
           ),
       ],

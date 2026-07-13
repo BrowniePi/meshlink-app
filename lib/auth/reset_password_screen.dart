@@ -7,9 +7,14 @@ import 'auth_service.dart';
 /// Enter the reset code from the email plus a new password. On success we pop
 /// back to login (every prior session was revoked server-side).
 class ResetPasswordScreen extends StatefulWidget {
-  const ResetPasswordScreen({super.key, required this.auth});
+  const ResetPasswordScreen(
+      {super.key, required this.auth, required this.email});
 
   final AuthService auth;
+
+  /// The account email the recovery code was sent to (the code is only valid
+  /// together with it).
+  final String email;
 
   @override
   State<ResetPasswordScreen> createState() => _ResetPasswordScreenState();
@@ -41,7 +46,8 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
       _error = null;
     });
     try {
-      await widget.auth.resetPassword(token: token, newPassword: password);
+      await widget.auth.resetPassword(
+          email: widget.email, token: token, newPassword: password);
       if (!mounted) return;
       Navigator.of(context).popUntil((r) => r.isFirst);
       ScaffoldMessenger.of(context).showSnackBar(

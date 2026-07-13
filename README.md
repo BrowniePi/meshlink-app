@@ -52,39 +52,27 @@ flutter run -d android
 Android 12+ prompts for Nearby Devices (BLUETOOTH_SCAN/CONNECT) permissions at
 first scan. Emulators generally have no usable BLE stack; use a real device.
 
-### Pointing at a backend (Phase 5)
+### Pointing at a backend (Phase 5 / alt-backend)
 
-Onboarding needs to reach a running `meshlink-backend` to fetch an attestation
-token. By default the app points at the hosted backend
-(`https://meshlink-backend-0l2d.onrender.com`), so a plain
+The backend is a Supabase project (see meshlink-backend `alt-backend`:
+`docs/supabase-migration.md`), or a venue-local service speaking the same
+Supabase-shaped REST. Auth, the directory, online mode, and the ticket →
+attestation-token chain all ride the same base URL. Supabase is always-on —
+the old Render cold-start caveats (and the app's 75s auth-timeout workaround)
+are gone.
 
-```
-flutter run
-```
-
-works out of the box on both emulators/simulators and physical devices — no
-LAN IP needed.
-
-Render's free tier spins down when idle, so the first request after a period
-of inactivity can take up to ~30-50s to wake. The onboarding attestation call
-has a 10s timeout and surfaces this as a retryable "Backend timed out — try
-again" error rather than a crash — if you see that once at the start of a
-demo, it's the backend waking up, not a bug; retry.
-
-To point at a backend running locally instead (`localhost`/`127.0.0.1` refers
-to the phone itself, not your dev machine, so on a physical device you need
-the backend machine's LAN IP):
-```
-ipconfig getifaddr en0 || ipconfig getifaddr en1
-```
+Point a build at your project:
 ```
 flutter run \
-  --dart-define=MESHLINK_BACKEND_URL=http://192.168.1.14:8000 \
+  --dart-define=MESHLINK_BACKEND_URL=https://<project-ref>.supabase.co \
+  --dart-define=MESHLINK_SUPABASE_ANON_KEY=<anon key> \
   --dart-define=MESHLINK_EVENT_ID=meshlink-demo
 ```
 
-The phone and the machine running the backend must be on the same network.
-`event_id` is a per-ticket field (supplied at `POST /tickets`), not a
+With no dart-defines the app targets a local `supabase start` stack
+(`http://127.0.0.1:54321` with the CLI's demo anon key; on a physical device
+substitute your dev machine's LAN IP — `localhost` refers to the phone).
+`event_id` is a per-ticket field (supplied at ticket purchase), not a
 backend-wide setting — it must match what the ticket was actually issued
 with. See `lib/config/backend_config.dart` for defaults.
 

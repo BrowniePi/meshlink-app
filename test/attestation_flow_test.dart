@@ -21,13 +21,13 @@ void main() {
     final client = MockClient((req) async {
       paths.add(req.url.path);
       final body = jsonDecode(req.body) as Map<String, dynamic>;
-      if (req.url.path == '/tickets') {
+      if (req.url.path == '/functions/v1/tickets') {
         expect(body['event_id'], 'evt-1');
         expect(body['buyer_pubkey'], _pubkey);
         return http.Response(
             jsonEncode({'ticket_id': 'tk-9'}), 201);
       }
-      // /attestation/token
+      // /functions/v1/attestation-token
       expect(body['ticket_id'], 'tk-9');
       expect(body['device_pubkey'], _pubkey);
       return http.Response(
@@ -36,7 +36,7 @@ void main() {
 
     final token = await _flow(client).fetchToken(_pubkey);
 
-    expect(paths, ['/tickets', '/attestation/token']);
+    expect(paths, ['/functions/v1/tickets', '/functions/v1/attestation-token']);
     expect(token.token, 'j.w.t');
     expect(token.expiresAt,
         DateTime.fromMillisecondsSinceEpoch(1800000000 * 1000));
@@ -45,7 +45,7 @@ void main() {
   test('retries a transient 500 then succeeds', () async {
     var ticketCalls = 0;
     final client = MockClient((req) async {
-      if (req.url.path == '/tickets') {
+      if (req.url.path == '/functions/v1/tickets') {
         ticketCalls++;
         if (ticketCalls == 1) return http.Response('upstream', 500);
         return http.Response(jsonEncode({'ticket_id': 'tk'}), 201);
@@ -64,7 +64,7 @@ void main() {
     var calls = 0;
     final client = MockClient((req) async {
       calls++;
-      if (req.url.path == '/tickets') {
+      if (req.url.path == '/functions/v1/tickets') {
         return http.Response(jsonEncode({'ticket_id': 'tk'}), 201);
       }
       return http.Response(

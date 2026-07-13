@@ -56,10 +56,12 @@ class LocationBlobResult {
   final DateTime updatedAt;
 }
 
-/// Client for the backend `/online/*` endpoints — the internet-primary
-/// counterpart of the mesh flows. Every call is account-scoped: the access
-/// token comes from [accessToken] per request (AuthService rotates it).
-/// The server only ever sees ciphertext for messages and locations.
+/// Client for the online-mode Supabase surface (PostgREST RPCs + RLS-scoped
+/// table reads) — the internet-primary counterpart of the mesh flows. Every
+/// call is account-scoped: the access token comes from [accessToken] per
+/// request (AuthService rotates it). The server only ever sees ciphertext for
+/// messages and locations, and the RPCs keep the old API's status codes
+/// (PTxxx SQLSTATEs map straight to HTTP).
 class OnlineClient {
   OnlineClient({
     required this.config,
@@ -75,20 +77,27 @@ class OnlineClient {
 
   Future<Map<String, String>> _headers() async => {
         'Content-Type': 'application/json',
+        'apikey': config.anonKey,
         'Authorization': 'Bearer ${await accessToken()}',
       };
 
-  Future<http.Response> _send(String method, String path,
-      {Map<String, dynamic>? body}) async {
+  Future<http.Response> _get(String path) async {
     try {
-      final headers = await _headers();
-      final uri = _uri(path);
-      final encoded = body == null ? null : jsonEncode(body);
-      return switch (method) {
-        'GET' => await _client.get(uri, headers: headers),
-        'PUT' => await _client.put(uri, headers: headers, body: encoded),
-        _ => await _client.post(uri, headers: headers, body: encoded),
-      };
+      return await _client.get(_uri(path), headers: await _headers());
+    } on OnlineException {
+      rethrow;
+    } catch (e) {
+      throw OnlineException('Backend unreachable: $e');
+    }
+  }
+
+  Future<http.Response> _rpc(String fn, Map<String, dynamic> body) async {
+    try {
+      return await _client.post(
+        _uri('/rest/v1/rpc/$fn'),
+        headers: await _headers(),
+        body: jsonEncode(body),
+      );
     } on OnlineException {
       rethrow;
     } catch (e) {
@@ -109,14 +118,13 @@ class OnlineClient {
   // ---- friend requests ----
 
   Future<void> sendFriendRequest(String toUsername) async {
-    final r = await _send('POST', '/online/friend-requests',
-        body: {'to_username': toUsername});
+    final r = await _rpc('send_friend_request', {'to_username': toUsername});
     if (r.statusCode == 409) return; // already friends — nothing to send
-    if (r.statusCode != 201) _fail(r, 'friend request');
+    if (r.statusCode != 200) _fail(r, 'friend request');
   }
 
   Future<PendingRequests> pendingFriendRequests() async {
-    final r = await _send('GET', '/online/friend-requests');
+    final r = await _rpc('get_friend_requests', {});
     if (r.statusCode != 200) _fail(r, 'friend-request list');
     final body = jsonDecode(r.body) as Map<String, dynamic>;
     return PendingRequests(
@@ -132,26 +140,26 @@ class OnlineClient {
   }
 
   Future<void> acceptFriendRequest(String fromUsername) async {
-    final r = await _send('POST', '/online/friend-requests/$fromUsername/accept');
+    final r = await _rpc('accept_friend_request', {'from_username': fromUsername});
     if (r.statusCode != 200) _fail(r, 'accept');
   }
 
   Future<void> declineFriendRequest(String fromUsername) async {
     final r =
-        await _send('POST', '/online/friend-requests/$fromUsername/decline');
+        await _rpc('decline_friend_request', {'from_username': fromUsername});
     if (r.statusCode != 200) _fail(r, 'decline');
   }
 
   /// Server-side friendship state per peer (from the friendships mirror) —
   /// how a requester learns their outbound request was accepted while the
-  /// push socket was down.
+  /// push socket was down. RLS scopes the rows to me; [me] picks the peer
+  /// column out of each canonical pair.
   Future<Map<String, String>> friendshipStates(String me) async {
-    final r = await _send('GET', '/friendships/$me');
+    final r = await _get('/rest/v1/friendships');
     if (r.statusCode != 200) _fail(r, 'friendships');
-    final body = jsonDecode(r.body) as Map<String, dynamic>;
+    final rows = (jsonDecode(r.body) as List).cast<Map<String, dynamic>>();
     return {
-      for (final m
-          in (body['friendships'] as List).cast<Map<String, dynamic>>())
+      for (final m in rows)
         (m['user_a'] == me ? m['user_b'] : m['user_a']) as String:
             m['state'] as String,
     };
@@ -160,19 +168,21 @@ class OnlineClient {
   // ---- E2EE message relay ----
 
   Future<void> sendRelay(String toUsername, Uint8List body) async {
-    final r = await _send('POST', '/online/messages', body: {
+    final r = await _rpc('send_message', {
       'to_username': toUsername,
       'ciphertext': base64Encode(body),
     });
-    if (r.statusCode != 201) _fail(r, 'message');
+    if (r.statusCode != 200) _fail(r, 'message');
   }
 
   Future<List<RelayedMessage>> inbox() async {
-    final r = await _send('GET', '/online/messages');
+    final r = await _get(
+        '/rest/v1/relay_messages?select=id,from_user,ciphertext,created_at'
+        '&order=created_at.asc,id.asc');
     if (r.statusCode != 200) _fail(r, 'inbox');
-    final body = jsonDecode(r.body) as Map<String, dynamic>;
+    final rows = (jsonDecode(r.body) as List).cast<Map<String, dynamic>>();
     return [
-      for (final m in (body['messages'] as List).cast<Map<String, dynamic>>())
+      for (final m in rows)
         RelayedMessage(
           id: m['id'] as String,
           fromUser: m['from_user'] as String,
@@ -185,7 +195,7 @@ class OnlineClient {
 
   Future<void> ackMessages(List<String> ids) async {
     if (ids.isEmpty) return;
-    final r = await _send('POST', '/online/messages/ack', body: {'ids': ids});
+    final r = await _rpc('ack_messages', {'ids': ids});
     if (r.statusCode != 200) _fail(r, 'ack');
   }
 
@@ -194,7 +204,7 @@ class OnlineClient {
   /// Replace ALL my blobs — one per friend currently shared with. An empty
   /// map IS the revoke-everyone path.
   Future<void> putLocationBlobs(Map<String, Uint8List> blobsByFriend) async {
-    final r = await _send('PUT', '/online/location', body: {
+    final r = await _rpc('put_location_blobs', {
       'blobs': [
         for (final e in blobsByFriend.entries)
           {'friend_username': e.key, 'ciphertext': base64Encode(e.value)}
@@ -206,7 +216,7 @@ class OnlineClient {
   /// The blob [owner] sealed for me. [OnlineException.notFound] uniformly
   /// covers not-sharing / unknown — mirrors the mesh's silent refusal.
   Future<LocationBlobResult> getLocationBlob(String owner) async {
-    final r = await _send('GET', '/online/location/$owner');
+    final r = await _rpc('get_location', {'owner_username': owner});
     if (r.statusCode != 200) _fail(r, 'location');
     final body = jsonDecode(r.body) as Map<String, dynamic>;
     return LocationBlobResult(

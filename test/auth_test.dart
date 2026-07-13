@@ -13,7 +13,8 @@ import 'package:meshlink_app/identity/encryption_identity.dart';
 import 'package:meshlink_app/identity/secure_storage.dart';
 import 'package:meshlink_app/identity/token_storage.dart';
 
-const _config = BackendConfig(baseUrl: 'http://test', eventId: 'evt-1');
+const _config = BackendConfig(
+    baseUrl: 'http://test', eventId: 'evt-1', anonKey: 'anon-test');
 
 /// In-memory stand-in for the native Keychain/Keystore bridge.
 class _FakeStorage implements SecureStorage {
@@ -30,37 +31,90 @@ AuthClient _client(MockClient mock) => AuthClient(config: _config, client: mock)
 
 Uint8List _pub() => Uint8List(32);
 
-void main() {
-  group('AuthClient error mapping', () {
-    test('signup maps 409 email vs username by detail', () async {
-      final emailTaken = _client(MockClient((_) async =>
-          http.Response(jsonEncode({'detail': 'email already registered'}), 409)));
-      final e1 = await emailTaken
-          .signup(email: 'a@x.com', username: 'a', password: 'password123',
-              curve25519Pub: _pub(), ed25519Pub: _pub())
-          .then<Object?>((_) => null, onError: (Object e) => e);
-      expect((e1! as AuthException).emailTaken, isTrue);
-
-      final nameTaken = _client(MockClient((_) async =>
-          http.Response(jsonEncode({'detail': 'username already taken'}), 409)));
-      final e2 = await nameTaken
-          .signup(email: 'a@x.com', username: 'a', password: 'password123',
-              curve25519Pub: _pub(), ed25519Pub: _pub())
-          .then<Object?>((_) => null, onError: (Object e) => e);
-      expect((e2! as AuthException).usernameTaken, isTrue);
+String _gotrueSession({String access = 'a.b.c', String refresh = 'refresh-1',
+    int expiresAt = 1800000000, String username = 'ada'}) =>
+    jsonEncode({
+      'access_token': access,
+      'refresh_token': refresh,
+      'expires_at': expiresAt,
+      'expires_in': 3600,
+      'user': {
+        'id': 'uuid-1',
+        'user_metadata': {'username': username},
+      },
     });
 
-    test('login maps 403 → unverified and 401 → invalidCredentials', () async {
-      final unverified = _client(MockClient((_) async =>
-          http.Response(jsonEncode({'detail': 'email not verified'}), 403)));
+/// Serves the GoTrue/PostgREST surface a successful login touches: the token
+/// grant plus the profiles key-rebind PATCH.
+MockClient _loginMock({String sessionBody = ''}) => MockClient((req) async {
+      if (req.url.path == '/auth/v1/token') {
+        return http.Response(
+            sessionBody.isEmpty ? _gotrueSession() : sessionBody, 200);
+      }
+      if (req.url.path == '/rest/v1/profiles') {
+        return http.Response('', 204);
+      }
+      return http.Response('not found', 404);
+    });
+
+void main() {
+  group('AuthClient error mapping', () {
+    test('signup pre-check rejects a taken username', () async {
+      final client = _client(MockClient((req) async {
+        if (req.url.path == '/rest/v1/rpc/username_available') {
+          return http.Response('false', 200);
+        }
+        fail('signup must not be attempted after a failed pre-check');
+      }));
+      final e = await client
+          .signup(email: 'a@x.com', username: 'a', password: 'password123',
+              curve25519Pub: _pub(), ed25519Pub: _pub())
+          .then<Object?>((_) => null, onError: (Object e) => e);
+      expect((e! as AuthException).usernameTaken, isTrue);
+    });
+
+    test('signup maps user_already_exists → emailTaken', () async {
+      final client = _client(MockClient((req) async {
+        if (req.url.path == '/rest/v1/rpc/username_available') {
+          return http.Response('true', 200);
+        }
+        return http.Response(
+            jsonEncode({
+              'code': 422,
+              'error_code': 'user_already_exists',
+              'msg': 'User already registered',
+            }),
+            422);
+      }));
+      final e = await client
+          .signup(email: 'a@x.com', username: 'a', password: 'password123',
+              curve25519Pub: _pub(), ed25519Pub: _pub())
+          .then<Object?>((_) => null, onError: (Object e) => e);
+      expect((e! as AuthException).emailTaken, isTrue);
+    });
+
+    test('login maps email_not_confirmed → unverified and '
+        'invalid_credentials → invalidCredentials', () async {
+      final unverified = _client(MockClient((_) async => http.Response(
+          jsonEncode({
+            'code': 400,
+            'error_code': 'email_not_confirmed',
+            'msg': 'Email not confirmed',
+          }),
+          400)));
       final e1 = await unverified
           .login(email: 'a@x.com', password: 'password123',
               curve25519Pub: _pub(), ed25519Pub: _pub())
           .then<Object?>((_) => null, onError: (Object e) => e);
       expect((e1! as AuthException).unverified, isTrue);
 
-      final bad = _client(MockClient((_) async =>
-          http.Response(jsonEncode({'detail': 'invalid credentials'}), 401)));
+      final bad = _client(MockClient((_) async => http.Response(
+          jsonEncode({
+            'code': 400,
+            'error_code': 'invalid_credentials',
+            'msg': 'Invalid login credentials',
+          }),
+          400)));
       final e2 = await bad
           .login(email: 'a@x.com', password: 'password123',
               curve25519Pub: _pub(), ed25519Pub: _pub())
@@ -68,20 +122,31 @@ void main() {
       expect((e2! as AuthException).invalidCredentials, isTrue);
     });
 
-    test('login returns a Session on 200', () async {
-      final client = _client(MockClient((_) async => http.Response(
-          jsonEncode({
-            'access_token': 'a.b.c',
-            'refresh_token': 'refresh-1',
-            'expires_at': 1800000000,
-            'username': 'ada',
-          }),
-          200)));
+    test('login returns a Session on 200 and rebinds the device keys',
+        () async {
+      var rebindServed = false;
+      final client = _client(MockClient((req) async {
+        if (req.url.path == '/auth/v1/token') {
+          expect(req.url.queryParameters['grant_type'], 'password');
+          expect(req.headers['apikey'], 'anon-test');
+          return http.Response(_gotrueSession(), 200);
+        }
+        if (req.url.path == '/rest/v1/profiles' && req.method == 'PATCH') {
+          rebindServed = true;
+          expect(req.url.queryParameters['id'], 'eq.uuid-1');
+          final body = jsonDecode(req.body) as Map<String, dynamic>;
+          expect(body['curve25519_pub'], '00' * 32);
+          expect(body['ed25519_pub'], '00' * 32);
+          return http.Response('', 204);
+        }
+        return http.Response('not found', 404);
+      }));
       final session = await client.login(
           email: 'a@x.com', password: 'password123',
           curve25519Pub: _pub(), ed25519Pub: _pub());
       expect(session.username, 'ada');
       expect(session.accessToken, 'a.b.c');
+      expect(rebindServed, isTrue);
     });
   });
 
@@ -100,14 +165,7 @@ void main() {
 
     test('login persists the session and reports logged in', () async {
       final storage = _FakeStorage();
-      final mock = MockClient((_) async => http.Response(
-          jsonEncode({
-            'access_token': 'a.b.c',
-            'refresh_token': 'refresh-1',
-            'expires_at': 1800000000,
-            'username': 'ada',
-          }),
-          200));
+      final mock = _loginMock();
       final auth = await build(mock, storage);
       expect(auth.isLoggedIn, isFalse);
       await auth.login(email: 'a@x.com', password: 'password123');
@@ -121,14 +179,7 @@ void main() {
 
     test('logout clears the session and attestation token', () async {
       final storage = _FakeStorage();
-      final mock = MockClient((_) async => http.Response(
-          jsonEncode({
-            'access_token': 'a.b.c',
-            'refresh_token': 'refresh-1',
-            'expires_at': 1800000000,
-            'username': 'ada',
-          }),
-          200));
+      final mock = _loginMock();
       await TokenStorage(storage).write(AttestationToken(
           token: 'att', expiresAt: DateTime.fromMillisecondsSinceEpoch(0)));
       final auth = await build(mock, storage);
@@ -144,25 +195,17 @@ void main() {
       final storage = _FakeStorage();
       var loginServed = false;
       final mock = MockClient((req) async {
-        if (req.url.path == '/auth/login') {
+        if (req.url.path == '/rest/v1/profiles') {
+          return http.Response('', 204);
+        }
+        if (req.url.queryParameters['grant_type'] == 'password') {
           loginServed = true;
           return http.Response(
-              jsonEncode({
-                'access_token': 'old',
-                'refresh_token': 'refresh-1',
-                'expires_at': 0, // already expired
-                'username': 'ada',
-              }),
-              200);
+              _gotrueSession(access: 'old', expiresAt: 0), 200);
         }
-        // /auth/refresh
+        // grant_type=refresh_token
         return http.Response(
-            jsonEncode({
-              'access_token': 'fresh',
-              'refresh_token': 'refresh-2',
-              'expires_at': 1800000000,
-            }),
-            200);
+            _gotrueSession(access: 'fresh', refresh: 'refresh-2'), 200);
       });
       final auth = await build(mock, storage);
       await auth.login(email: 'a@x.com', password: 'password123');

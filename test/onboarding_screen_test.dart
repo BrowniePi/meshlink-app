@@ -102,7 +102,7 @@ void main() {
     AttestationToken? completed;
 
     final client = MockClient((req) async {
-      if (req.url.path == '/tickets') {
+      if (req.url.path == '/functions/v1/tickets') {
         return http.Response(jsonEncode({'ticket_id': 'tk'}), 201);
       }
       return http.Response(
@@ -132,7 +132,7 @@ void main() {
     final client = MockClient((req) async {
       attempts++;
       if (attempts <= 3) throw Exception('connection refused');
-      if (req.url.path == '/tickets') {
+      if (req.url.path == '/functions/v1/tickets') {
         return http.Response(jsonEncode({'ticket_id': 'tk'}), 201);
       }
       return http.Response(
@@ -163,7 +163,7 @@ void main() {
     final storage = TokenStorage(SecureStorage());
 
     final client = MockClient((req) async {
-      if (req.url.path == '/tickets') {
+      if (req.url.path == '/functions/v1/tickets') {
         return http.Response(jsonEncode({'ticket_id': 'tk'}), 201);
       }
       return http.Response(jsonEncode({'detail': 'ticket expired'}), 403);

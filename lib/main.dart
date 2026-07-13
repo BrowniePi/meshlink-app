@@ -85,7 +85,7 @@ Future<void> main() async {
       client: backendClient,
     ),
     accessToken: authService.validAccessToken,
-    baseUrl: BackendConfig.fromEnvironment.baseUrl,
+    config: BackendConfig.fromEnvironment,
   );
 
   // The welcome/onboarding intro is shown once, after the first verified
@@ -234,6 +234,7 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
     _friends = FriendService(
       store: FriendStore(widget.storage),
       directory: DirectoryClient(config: BackendConfig.fromEnvironment,
+          accessToken: widget.authService.validAccessToken,
           client: widget.backendClient),
       identity: widget.identity,
       encryption: widget.encryption,

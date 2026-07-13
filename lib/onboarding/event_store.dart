@@ -67,9 +67,14 @@ class EventsClient {
   Future<List<EventInfo>> list() async {
     final http.Response response;
     try {
-      response = await _client
-          .get(Uri.parse('${config.baseUrl}/events'))
-          .timeout(const Duration(seconds: 10));
+      response = await _client.get(
+        Uri.parse('${config.baseUrl}/rest/v1/events?select=event_id,name'
+            '&order=event_id'),
+        headers: {
+          'apikey': config.anonKey,
+          'Authorization': 'Bearer ${config.anonKey}',
+        },
+      ).timeout(const Duration(seconds: 10));
     } on TimeoutException {
       throw const EventsException(
           'Backend timed out — check the connection and try again');
@@ -80,9 +85,8 @@ class EventsClient {
       throw EventsException('Backend error (${response.statusCode})');
     }
     try {
-      final body = jsonDecode(response.body) as Map<String, dynamic>;
       return [
-        for (final e in body['events'] as List)
+        for (final e in jsonDecode(response.body) as List)
           EventInfo.fromJson(e as Map<String, dynamic>)
       ];
     } catch (_) {

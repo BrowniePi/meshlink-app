@@ -122,10 +122,10 @@ class AuthService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> verifyEmail(String token) async {
-    dbg.DebugLog.instance.log('auth', 'verify-email: submitting token');
+  Future<void> verifyEmail({required String email, required String token}) async {
+    dbg.DebugLog.instance.log('auth', 'verify-email: submitting code');
     try {
-      await client.verifyEmail(token);
+      await client.verifyEmail(email: email, token: token);
     } on AuthException catch (e) {
       dbg.DebugLog.instance.log('auth', 'verify-email failed: ${e.message}',
           level: dbg.LogLevel.warn);
@@ -147,12 +147,14 @@ class AuthService extends ChangeNotifier {
   }
 
   Future<void> resetPassword({
+    required String email,
     required String token,
     required String newPassword,
   }) async {
     dbg.DebugLog.instance.log('auth', 'reset-password: submitting new password');
     try {
-      await client.resetPassword(token: token, newPassword: newPassword);
+      await client.resetPassword(
+          email: email, token: token, newPassword: newPassword);
     } on AuthException catch (e) {
       dbg.DebugLog.instance.log('auth', 'reset-password failed: ${e.message}',
           level: dbg.LogLevel.warn);

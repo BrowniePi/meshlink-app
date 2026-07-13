@@ -25,19 +25,35 @@ class DirectoryEntry {
   final Uint8List ed25519Pub;
 }
 
-/// Client for the backend account/directory endpoints (Phase 5 extension).
-/// The backend holds identity + social graph only — nothing here ever sends
-/// a location anywhere.
+/// Client for the public directory (a Supabase view over profiles) and the
+/// friendship mirror RPC. The backend holds identity + social graph only —
+/// nothing here ever sends a location anywhere.
 class DirectoryClient {
-  DirectoryClient({required this.config, http.Client? client})
-      : _client = client ?? http.Client();
+  DirectoryClient({
+    required this.config,
+    this.accessToken,
+    http.Client? client,
+  }) : _client = client ?? http.Client();
 
   final BackendConfig config;
+
+  /// Bearer supplier for the authenticated mirror RPC (AuthService rotates
+  /// it). Null → the mirror silently skips, matching its best-effort nature.
+  final Future<String> Function()? accessToken;
+
   final http.Client _client;
 
   Uri _uri(String path) => Uri.parse('${config.baseUrl}$path');
 
-  /// POST /account — register our username + both public keys.
+  Map<String, String> _headers([String? bearer]) => {
+        'Content-Type': 'application/json',
+        'apikey': config.anonKey,
+        'Authorization': 'Bearer ${bearer ?? config.anonKey}',
+      };
+
+  /// Directory rows are created by the signup trigger now; this legacy
+  /// registration path only surfaces a taken name early (test harness /
+  /// directory-only flows).
   Future<void> createAccount({
     required String username,
     required Uint8List curve25519Pub,
@@ -46,47 +62,39 @@ class DirectoryClient {
     final http.Response response;
     try {
       response = await _client.post(
-        _uri('/account'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'username': username,
-          'curve25519_pub': _hex(curve25519Pub),
-          'ed25519_pub': _hex(ed25519Pub),
-        }),
+        _uri('/rest/v1/rpc/username_available'),
+        headers: _headers(),
+        body: jsonEncode({'name': username}),
       );
     } catch (e) {
       throw DirectoryException('Backend unreachable: $e');
     }
-    if (response.statusCode == 409) {
+    if (response.statusCode == 200 && response.body.trim() == 'false') {
       throw const DirectoryException('That username is taken',
           usernameTaken: true);
     }
-    if (response.statusCode == 422) {
-      throw const DirectoryException(
-          'Usernames are 1-32 characters of a-z, 0-9, dots, dashes, underscores',
-          usernameTaken: true);
-    }
-    if (response.statusCode != 201) {
-      throw DirectoryException('Account creation failed (${response.statusCode})');
-    }
   }
 
-  /// GET /directory/{username} — resolve a username to its public keys.
-  /// The caller pins these locally (TOFU) — later lookups never overwrite.
+  /// Resolve a username to its public keys. The caller pins these locally
+  /// (TOFU) — later lookups never overwrite.
   Future<DirectoryEntry> resolve(String username) async {
     final http.Response response;
     try {
-      response = await _client.get(_uri('/directory/$username'));
+      response = await _client.get(
+        _uri('/rest/v1/directory?username=eq.$username'),
+        headers: _headers(),
+      );
     } catch (e) {
       throw DirectoryException('Backend unreachable: $e');
-    }
-    if (response.statusCode == 404) {
-      throw DirectoryException('No user named "$username"', notFound: true);
     }
     if (response.statusCode != 200) {
       throw DirectoryException('Directory lookup failed (${response.statusCode})');
     }
-    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    final rows = jsonDecode(response.body) as List;
+    if (rows.isEmpty) {
+      throw DirectoryException('No user named "$username"', notFound: true);
+    }
+    final body = rows.first as Map<String, dynamic>;
     return DirectoryEntry(
       body['username'] as String,
       _fromHex(body['curve25519_pub'] as String),
@@ -94,7 +102,8 @@ class DirectoryClient {
     );
   }
 
-  /// POST /friendships — mirror phone-authoritative state for recovery.
+  /// Mirror phone-authoritative friendship state for recovery
+  /// (rpc/mirror_friendship — the caller must be one of the pair).
   /// Fire-and-forget: the mesh works without the backend; the mirror is
   /// best-effort (phones remain the source of truth).
   Future<void> mirrorFriendship({
@@ -104,10 +113,12 @@ class DirectoryClient {
     required bool aSharesLoc,
     required bool bSharesLoc,
   }) async {
+    final token = accessToken;
+    if (token == null) return;
     try {
       await _client.post(
-        _uri('/friendships'),
-        headers: {'Content-Type': 'application/json'},
+        _uri('/rest/v1/rpc/mirror_friendship'),
+        headers: _headers(await token()),
         body: jsonEncode({
           'user_a': userA,
           'user_b': userB,
@@ -121,9 +132,6 @@ class DirectoryClient {
     }
   }
 }
-
-String _hex(Uint8List bytes) =>
-    bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
 Uint8List _fromHex(String hex) {
   final out = Uint8List(hex.length ~/ 2);

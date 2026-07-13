@@ -31,7 +31,7 @@ void main() {
         client: backend.mockClient(registry),
       ),
       accessToken: () async => username,
-      baseUrl: 'http://test',
+      config: const BackendConfig(baseUrl: 'http://test', eventId: 'test'),
     );
     phone.friends.attachOnline(service);
     service.debugSetConnected(true);
@@ -232,7 +232,8 @@ class FakeOnlineBackend {
       Map<String, dynamic> body() =>
           jsonDecode(request.body) as Map<String, dynamic>;
 
-      if (request.method == 'POST' && path == '/online/friend-requests') {
+      if (request.method == 'POST' &&
+          path == '/rest/v1/rpc/send_friend_request') {
         final to = body()['to_username'] as String;
         if (!registry.containsKey(to)) return http.Response('{}', 404);
         if (friendships[_pair(me, to)] == 'friends') {
@@ -242,9 +243,10 @@ class FakeOnlineBackend {
         return http.Response(
             jsonEncode({'from_user': me, 'to_user': to, 'state': 'pending',
                         'created_at': 0}),
-            201);
+            200);
       }
-      if (request.method == 'GET' && path == '/online/friend-requests') {
+      if (request.method == 'POST' &&
+          path == '/rest/v1/rpc/get_friend_requests') {
         return http.Response(
             jsonEncode({
               'incoming': [
@@ -260,10 +262,9 @@ class FakeOnlineBackend {
             }),
             200);
       }
-      final accept = RegExp(r'^/online/friend-requests/([^/]+)/accept$')
-          .firstMatch(path);
-      if (request.method == 'POST' && accept != null) {
-        final from = accept.group(1)!;
+      if (request.method == 'POST' &&
+          path == '/rest/v1/rpc/accept_friend_request') {
+        final from = body()['from_username'] as String;
         if (requests['$from>$me'] != 'pending') {
           return http.Response('{}', 404);
         }
@@ -271,10 +272,9 @@ class FakeOnlineBackend {
         friendships[_pair(from, me)] = 'friends';
         return http.Response(jsonEncode({'friend': registry[from]}), 200);
       }
-      final decline = RegExp(r'^/online/friend-requests/([^/]+)/decline$')
-          .firstMatch(path);
-      if (request.method == 'POST' && decline != null) {
-        final from = decline.group(1)!;
+      if (request.method == 'POST' &&
+          path == '/rest/v1/rpc/decline_friend_request') {
+        final from = body()['from_username'] as String;
         if (requests['$from>$me'] != 'pending') {
           return http.Response('{}', 404);
         }
@@ -282,7 +282,7 @@ class FakeOnlineBackend {
         return http.Response('{}', 200);
       }
 
-      if (request.method == 'POST' && path == '/online/messages') {
+      if (request.method == 'POST' && path == '/rest/v1/rpc/send_message') {
         if (failMessages) return http.Response('{}', 500);
         final to = body()['to_username'] as String;
         if (friendships[_pair(me, to)] != 'friends') {
@@ -296,28 +296,26 @@ class FakeOnlineBackend {
           'to': to,
           'ciphertext': ciphertext,
         });
-        return http.Response('{"id":"x","created_at":0}', 201);
+        return http.Response('{"id":"x","created_at":0}', 200);
       }
-      if (request.method == 'GET' && path == '/online/messages') {
+      if (request.method == 'GET' && path == '/rest/v1/relay_messages') {
         return http.Response(
-            jsonEncode({
-              'messages': [
-                for (final m in inboxFor(me))
-                  {'id': m['id'], 'from_user': m['from'],
-                   'ciphertext': m['ciphertext'], 'created_at': 0}
-              ],
-              'count': inboxFor(me).length,
-            }),
+            jsonEncode([
+              for (final m in inboxFor(me))
+                {'id': m['id'], 'from_user': m['from'],
+                 'ciphertext': m['ciphertext'], 'created_at': 0}
+            ]),
             200);
       }
-      if (request.method == 'POST' && path == '/online/messages/ack') {
+      if (request.method == 'POST' && path == '/rest/v1/rpc/ack_messages') {
         final ids = (body()['ids'] as List).cast<String>();
         messages.removeWhere(
             (m) => m['to'] == me && ids.contains(m['id']));
         return http.Response('{"acked":0}', 200);
       }
 
-      if (request.method == 'PUT' && path == '/online/location') {
+      if (request.method == 'POST' &&
+          path == '/rest/v1/rpc/put_location_blobs') {
         locationBlobs[me] = {
           for (final b in (body()['blobs'] as List)
               .cast<Map<String, dynamic>>())
@@ -325,9 +323,9 @@ class FakeOnlineBackend {
         };
         return http.Response('{"stored":0}', 200);
       }
-      final loc = RegExp(r'^/online/location/([^/]+)$').firstMatch(path);
-      if (request.method == 'GET' && loc != null) {
-        final blob = locationBlobs[loc.group(1)]?[me];
+      if (request.method == 'POST' && path == '/rest/v1/rpc/get_location') {
+        final owner = body()['owner_username'] as String;
+        final blob = locationBlobs[owner]?[me];
         if (blob == null) return http.Response('{}', 404);
         return http.Response(
             jsonEncode({
@@ -337,21 +335,17 @@ class FakeOnlineBackend {
             200);
       }
 
-      final mirror = RegExp(r'^/friendships/([^/]+)$').firstMatch(path);
-      if (request.method == 'GET' && mirror != null) {
-        final user = mirror.group(1)!;
+      if (request.method == 'GET' && path == '/rest/v1/friendships') {
         return http.Response(
-            jsonEncode({
-              'friendships': [
-                for (final e in friendships.entries)
-                  if (e.key.split('|').contains(user))
-                    {
-                      'user_a': e.key.split('|').first,
-                      'user_b': e.key.split('|').last,
-                      'state': e.value,
-                    }
-              ],
-            }),
+            jsonEncode([
+              for (final e in friendships.entries)
+                if (e.key.split('|').contains(me))
+                  {
+                    'user_a': e.key.split('|').first,
+                    'user_b': e.key.split('|').last,
+                    'state': e.value,
+                  }
+            ]),
             200);
       }
       return http.Response('not found', 404);

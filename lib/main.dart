@@ -20,6 +20,8 @@ import 'identity/encryption_identity.dart';
 import 'identity/secure_storage.dart';
 import 'identity/token_storage.dart';
 import 'onboarding/attestation_flow.dart';
+import 'online/online_client.dart';
+import 'online/online_service.dart';
 import 'onboarding/event_select_screen.dart';
 import 'onboarding/event_store.dart';
 import 'onboarding/onboarding_screen.dart';
@@ -73,6 +75,19 @@ Future<void> main() async {
   );
   await authService.init();
 
+  // Online mode: the backend push socket + REST relay. Primary transport for
+  // friend requests, DMs and location whenever it is up; the mesh takes over
+  // seamlessly when it isn't. Started/stopped with the login session.
+  final onlineService = OnlineService(
+    client: OnlineClient(
+      config: BackendConfig.fromEnvironment,
+      accessToken: authService.validAccessToken,
+      client: backendClient,
+    ),
+    accessToken: authService.validAccessToken,
+    baseUrl: BackendConfig.fromEnvironment.baseUrl,
+  );
+
   // The welcome/onboarding intro is shown once, after the first verified
   // login. Persisted so returning users skip it.
   final welcomeSeen = await storage.read(_welcomeSeenKey) == 'true';
@@ -88,6 +103,7 @@ Future<void> main() async {
     storage: storage,
     tokenStorage: tokenStorage,
     authService: authService,
+    onlineService: onlineService,
     eventStore: eventStore,
     backendChannel: backendChannel,
     backendClient: backendClient,
@@ -135,6 +151,7 @@ class MeshLinkApp extends StatefulWidget {
     required this.storage,
     required this.tokenStorage,
     required this.authService,
+    required this.onlineService,
     required this.eventStore,
     required this.backendChannel,
     required this.backendClient,
@@ -148,6 +165,7 @@ class MeshLinkApp extends StatefulWidget {
   final SecureStorage storage;
   final TokenStorage tokenStorage;
   final AuthService authService;
+  final OnlineService onlineService;
   final EventStore eventStore;
   final NodeBackendChannel backendChannel;
   final MeshBackendClient backendClient;
@@ -226,13 +244,26 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
     // Auth binds the account's username into this FriendService on login.
     widget.authService.attachFriends(_friends);
     widget.authService.addListener(_onAuthChanged);
+    // Online mode rides the login session: the push socket authenticates
+    // with the account's access token, so it runs exactly while logged in.
+    _friends.attachOnline(widget.onlineService);
+    _syncOnlineLifecycle();
     unawaited(_friends.init().then((_) {
       if (mounted) setState(() => _friendsReady = true);
     }));
   }
 
   void _onAuthChanged() {
+    _syncOnlineLifecycle();
     if (mounted) setState(() {});
+  }
+
+  void _syncOnlineLifecycle() {
+    if (widget.authService.isLoggedIn) {
+      widget.onlineService.start();
+    } else {
+      widget.onlineService.stop();
+    }
   }
 
   Future<void> _markWelcomeSeen() async {
@@ -300,6 +331,7 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
     _batteryTier.tier.removeListener(_onTierChanged);
     _batteryTier.stop();
     widget.authService.removeListener(_onAuthChanged);
+    widget.onlineService.stop();
     _friends.dispose();
     super.dispose();
   }

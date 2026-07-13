@@ -388,6 +388,9 @@ class FireflyController extends ChangeNotifier {
         notifyListeners();
       }
     }));
+    // A request sent into an empty cell reached nobody; re-spray it until the
+    // peer answers (the service spaces the re-sends out itself).
+    unawaited(friends.resendPendingRequests());
     // One location query per friend who granted us a token; the service
     // rate-limits to the node's 60 s minimum, so a 30 s cycle just retries
     // sooner after failures. Answers land in the service's freshest-wins
@@ -395,7 +398,12 @@ class FireflyController extends ChangeNotifier {
     // could overwrite a fresher racing answer with the first one back.
     for (final entry in friends.friends) {
       final username = entry.record.peerUsername;
-      if (entry.theirTokenToMe == null || !isVisible(username)) continue;
+      // A capability token gates the mesh path only; online, the friend's
+      // sealed blob (or its absence) is the consent check.
+      if ((entry.theirTokenToMe == null && !friends.isOnline) ||
+          !isVisible(username)) {
+        continue;
+      }
       unawaited(friends.queryFriendLocation(username));
     }
   }

@@ -11,6 +11,8 @@ import '../core/pipeline.dart';
 import '../debug/debug_log.dart' as dbg;
 import '../identity/device_identity.dart';
 import '../identity/encryption_identity.dart';
+import '../online/online_client.dart';
+import '../online/online_service.dart';
 import '../transport/transport.dart';
 import 'directory_client.dart';
 import 'friend_state.dart';
@@ -31,15 +33,24 @@ const Duration queryMinInterval = Duration(seconds: 60);
 /// (checked hourly) so sharing survives the 24 h default expiry unattended.
 const Duration tokenRefreshMargin = Duration(hours: 2);
 
+/// Minimum spacing between re-sends of an unanswered outbound FRIEND_REQUEST.
+/// The mesh has no delivery receipt: a request sent while the other phone is
+/// out of the cell reaches nobody and is simply gone, so it is re-sprayed
+/// until they answer (accept/decline) instead of being fired once and lost.
+const Duration requestResendInterval = Duration(minutes: 2);
+
 typedef PositionReader = Future<({double lat, double lon, double accuracyM})?>
     Function();
 
-/// Orchestrates the four friendship flows over the mesh: request/accept
-/// (mutual consent), per-friend location sharing (capability tokens), and
-/// friend-location queries. Pure protocol logic lives in the core ports
-/// (friend_state / capability_token / friend_wire); this class does I/O and
-/// persistence and notifies the UI.
-class FriendService extends ChangeNotifier {
+/// Orchestrates the four friendship flows over the mesh AND the online
+/// backend: request/accept (mutual consent), per-friend location sharing
+/// (capability tokens offline, sealed blobs online), and friend-location
+/// queries. Online is primary whenever the backend push socket is up
+/// ([attachOnline]); the mesh is the fallback — and the only path — when it
+/// isn't. Pure protocol logic lives in the core ports (friend_state /
+/// capability_token / friend_wire); this class does I/O and persistence and
+/// notifies the UI.
+class FriendService extends ChangeNotifier implements OnlineHandler {
   FriendService({
     required this.store,
     required this.directory,
@@ -75,11 +86,32 @@ class FriendService extends ChangeNotifier {
   /// attestation-gated node).
   Future<void> Function()? presentAttestation;
 
+  /// The online (backend) channel, attached post-construction like
+  /// [presentAttestation] — null in mesh-only tests. While its socket is up,
+  /// online is the primary transport for friend requests, DMs and location.
+  OnlineService? _online;
+
+  /// Wire the online channel in and become its event handler. Connectivity
+  /// flips are re-broadcast to our own listeners so the UI indicator updates
+  /// through the one listener chain screens already have.
+  void attachOnline(OnlineService online) {
+    _online = online;
+    online.handler = this;
+    online.addListener(notifyListeners);
+  }
+
+  /// Whether the backend channel is usable right now (the mode indicator).
+  bool get isOnline => _online?.connected ?? false;
+
   late final Uint8List _ephemId;
   Timer? _beaconTimer;
   Timer? _refreshTimer;
   final Map<String, DateTime> _lastQueryAt = {};
   final Map<String, Completer<LocationResponsePayload?>> _pendingQueries = {};
+
+  /// When each unanswered outbound FRIEND_REQUEST was last sprayed, so the
+  /// retry in [resendPendingRequests] respects [requestResendInterval].
+  final Map<String, DateTime> _lastRequestSentAt = {};
 
   /// Freshest location answer seen per friend (keyed by username). With two
   /// possible answerers per query — the target phone (live fix) and a node
@@ -110,6 +142,7 @@ class FriendService extends ChangeNotifier {
   void dispose() {
     _beaconTimer?.cancel();
     _refreshTimer?.cancel();
+    _online?.removeListener(notifyListeners);
     super.dispose();
   }
 
@@ -142,9 +175,15 @@ class FriendService extends ChangeNotifier {
   // ---- flow 2: friend request / accept (mutual consent) ----
 
   /// "Add friend": resolve the username, pin their keys locally (TOFU — a
-  /// later directory answer never overwrites what we pinned), send
-  /// FRIEND_REQUEST encrypted to them.
-  Future<void> sendFriendRequest(String username) async {
+  /// later directory answer never overwrites what we pinned), then deliver
+  /// the request — via the backend when online (primary; the server holds it
+  /// until the friend sees it), sprayed over the mesh otherwise.
+  ///
+  /// Returns how many carriers took the request (peers, or 1 for the
+  /// backend). Zero is not a failure — the request stays in
+  /// [FriendshipState.requested] and [resendPendingRequests] retries — but
+  /// the caller should say so rather than claim it was delivered.
+  Future<int> sendFriendRequest(String username) async {
     final existing = store.byUsername(username);
     if (existing != null && existing.record.state != FriendshipState.none) {
       throw DirectoryException('Already have a "$username" entry');
@@ -157,15 +196,65 @@ class FriendService extends ChangeNotifier {
     );
     final (next, effects) = transition(record, FriendEvent.sendRequest);
     assert(effects.contains(FriendEffect.emitFriendRequest));
+    final entry = FriendEntry(record: next);
+    var reached = 0;
+    if (await _sendRequestOnline(entry)) {
+      _lastRequestSentAt[next.peerUsername] = _now();
+      reached = 1;
+    } else {
+      reached = await _sprayRequest(next);
+    }
+    await store.put(entry);
+    notifyListeners();
+    return reached;
+  }
+
+  /// Deliver an outbound request to the backend. True on success (the
+  /// server now holds it — no re-sends needed); false offline or on error.
+  Future<bool> _sendRequestOnline(FriendEntry entry) async {
+    final online = _online;
+    if (online == null || !online.connected) return false;
+    try {
+      await online.client.sendFriendRequest(entry.record.peerUsername);
+      entry.requestSentOnline = true;
+      return true;
+    } on OnlineException catch (e) {
+      _log('online friend request failed ($e) — mesh fallback');
+      return false;
+    }
+  }
+
+  /// Retry any outbound request the peer has not answered yet. Called on
+  /// the UI poll cycle. Online-delivered requests sit on the server and need
+  /// no retry; anything else is re-POSTed once we're online, and re-sprayed
+  /// over the mesh regardless (the first send may have reached nobody, and
+  /// there is no delivery receipt that would tell us either way).
+  Future<void> resendPendingRequests() async {
+    for (final entry in store.entries) {
+      if (entry.record.state != FriendshipState.requested) continue;
+      if (!entry.requestSentOnline && await _sendRequestOnline(entry)) {
+        await store.put(entry);
+        _lastRequestSentAt[entry.record.peerUsername] = _now();
+        continue;
+      }
+      if (entry.requestSentOnline && isOnline) continue; // server holds it
+      final last = _lastRequestSentAt[entry.record.peerUsername];
+      if (last != null && _now().difference(last) < requestResendInterval) {
+        continue;
+      }
+      await _sprayRequest(entry.record);
+    }
+  }
+
+  Future<int> _sprayRequest(FriendshipRecord record) async {
     final payload = await encodeFriendRequest(
       FriendRequestPayload(
           store.ownUsername!, encryption.publicKey, identity.publicKey),
-      pubkeyId(resolved.ed25519Pub),
-      resolved.curve25519Pub,
+      pubkeyId(record.peerEd25519Pub),
+      record.peerCurve25519Pub,
     );
-    await _sendToPeers(msgTypeFriendRequest, payload);
-    await store.put(FriendEntry(record: next));
-    notifyListeners();
+    _lastRequestSentAt[record.peerUsername] = _now();
+    return _sendToPeers(msgTypeFriendRequest, payload);
   }
 
   /// Inbound requests awaiting our explicit consent. Never auto-accepted.
@@ -206,7 +295,31 @@ class FriendService extends ChangeNotifier {
     entry.pendingRequestMsgId = null;
     await store.put(entry);
     _syncBeaconLoop();
-    unawaited(_mirror(record));
+    // The mirror runs first so the server-side friendship row exists before
+    // the online paths below (message relay requires it).
+    await _mirror(record);
+    final online = _online;
+    if (online != null && online.connected) {
+      try {
+        await online.client.acceptFriendRequest(username);
+      } on OnlineException catch (e) {
+        // notFound = the request only ever existed on the mesh; fine.
+        if (!e.notFound) _log('online accept failed: $e');
+      }
+      if (token != null) {
+        // Deliver the capability token online too — the sealed accept
+        // payload doubles as the relay body, so a friend we never meet on
+        // the mesh can still be granted (their map falls back to the node
+        // path whenever BOTH end up offline later).
+        try {
+          await online.client.sendRelay(username,
+              Uint8List.fromList([msgTypeFriendAccept, ...payload]));
+        } on OnlineException catch (e) {
+          _log('online token delivery failed: $e');
+        }
+      }
+      unawaited(_uploadLocationBlobs());
+    }
     notifyListeners();
   }
 
@@ -218,6 +331,14 @@ class FriendService extends ChangeNotifier {
     final msgId = entry.pendingRequestMsgId ?? Uint8List(16);
     await _sendToPeers(msgTypeFriendDecline,
         encodeFriendDecline(msgId, pubkeyId(entry.record.peerEd25519Pub)));
+    final online = _online;
+    if (online != null && online.connected) {
+      try {
+        await online.client.declineFriendRequest(username);
+      } on OnlineException catch (e) {
+        if (!e.notFound) _log('online decline failed: $e');
+      }
+    }
     entry.record = record;
     entry.pendingRequestMsgId = null;
     await store.put(entry);
@@ -241,6 +362,7 @@ class FriendService extends ChangeNotifier {
     await store.put(entry);
     _syncBeaconLoop();
     unawaited(_mirror(record));
+    unawaited(_uploadLocationBlobs());
     notifyListeners();
   }
 
@@ -268,16 +390,21 @@ class FriendService extends ChangeNotifier {
     await store.put(entry);
     _syncBeaconLoop();
     unawaited(_mirror(record));
+    // Re-upload without this friend — replacing the whole blob set IS the
+    // online revoke.
+    unawaited(_uploadLocationBlobs());
     notifyListeners();
   }
 
   // ---- flow 5: direct messages ----
 
-  /// Send [text] to a friend, sealed to their pinned X25519 key. Best-effort
-  /// like all mesh traffic (spray-and-wait, no delivery receipt); the local
-  /// copy is appended to the conversation immediately with [DmStatus.sending],
-  /// then flipped to [DmStatus.relayed] once at least one peer took the
-  /// packet ([DmStatus.failed] when no peer was reachable).
+  /// Send [text] to a friend, sealed to their pinned X25519 key. Online is
+  /// primary: the backend stores the ciphertext until the friend's next
+  /// poll (it never sees the text). Offline — or if the relay rejects — the
+  /// message sprays over the mesh exactly as before. The local copy is
+  /// appended immediately with [DmStatus.sending], then flipped to
+  /// [DmStatus.relayed] once a carrier took it ([DmStatus.failed] when
+  /// neither the backend nor any peer was reachable).
   Future<void> sendDirectMessage(String username, String text) async {
     final entry = store.byUsername(username);
     if (entry == null || entry.record.state != FriendshipState.friends) {
@@ -292,23 +419,39 @@ class FriendService extends ChangeNotifier {
         text: text, outgoing: true, at: _now(), status: DmStatus.sending);
     entry.addMessage(message);
     notifyListeners();
-    final reached = await _sendToPeers(msgTypeDirectMessage, payload);
-    message.status = reached > 0 ? DmStatus.relayed : DmStatus.failed;
+    final online = _online;
+    var sent = false;
+    if (online != null && online.connected) {
+      try {
+        await online.client.sendRelay(username,
+            Uint8List.fromList([msgTypeDirectMessage, ...payload]));
+        message.via = DmVia.online;
+        sent = true;
+      } on OnlineException catch (e) {
+        _log('online DM failed ($e) — mesh fallback');
+      }
+    }
+    if (!sent) {
+      message.via = DmVia.mesh;
+      sent = await _sendToPeers(msgTypeDirectMessage, payload) > 0;
+    }
+    message.status = sent ? DmStatus.relayed : DmStatus.failed;
     await store.put(entry);
     notifyListeners();
   }
 
   // ---- flow 4: see a friend's location ----
 
-  /// Query the node for [username]'s last-known coordinate using the
-  /// capability token they granted us. Returns null — indistinguishably —
-  /// when never granted, revoked, expired, rate-limited, or unknown: the UI
-  /// shows "Location not available" for all of them, matching the node's
-  /// non-leaking refusals.
+  /// Query [username]'s last-known coordinate. Online first: fetch the
+  /// sealed blob they uploaded for us (its existence IS the consent — no
+  /// capability token needed). Otherwise the mesh path: spray a
+  /// LOCATION_QUERY carrying the token they granted us. Returns null —
+  /// indistinguishably — when never granted, revoked, expired, rate-limited,
+  /// or unknown: the UI shows "Location not available" for all of them,
+  /// matching the node's non-leaking refusals.
   Future<LocationResponsePayload?> queryFriendLocation(String username) async {
     final entry = store.byUsername(username);
-    final token = entry?.theirTokenToMe;
-    if (entry == null || token == null) return null;
+    if (entry == null) return null;
 
     final last = _lastQueryAt[username];
     if (last != null && _now().difference(last) < queryMinInterval) {
@@ -316,6 +459,11 @@ class FriendService extends ChangeNotifier {
     }
     _lastQueryAt[username] = _now();
 
+    final onlineResult = await _queryLocationOnline(entry);
+    if (onlineResult != null) return onlineResult;
+
+    final token = entry.theirTokenToMe;
+    if (token == null) return null;
     final completer = Completer<LocationResponsePayload?>();
     _pendingQueries[username] = completer;
     await _sendToPeers(msgTypeLocationQuery, encodeLocationQuery(token));
@@ -325,6 +473,47 @@ class FriendService extends ChangeNotifier {
         .timeout(const Duration(seconds: 10), onTimeout: () => null);
     _pendingQueries.remove(username);
     return result;
+  }
+
+  /// Fetch and open the sealed location blob [entry]'s friend uploaded for
+  /// us. Null (silently) when offline, not shared, or undecodable — the
+  /// caller falls through to the mesh path.
+  Future<LocationResponsePayload?> _queryLocationOnline(
+      FriendEntry entry) async {
+    final online = _online;
+    if (online == null || !online.connected) return null;
+    final username = entry.record.peerUsername;
+    try {
+      final blob = await online.client.getLocationBlob(username);
+      final payload =
+          await decodeLocationResponse(blob.payload, encryption.keyPair);
+      // The sealed body must name the friend we asked about (TOFU keys) —
+      // the server cannot forge this without breaking the seal.
+      if (_hex(payload.targetPubkeyId) !=
+          _hex(pubkeyId(entry.record.peerEd25519Pub))) {
+        _log('online location blob subject mismatch — dropped');
+        return null;
+      }
+      // Staleness comes from the server's updated_at, not the sealed body
+      // (the blob was fresh when uploaded).
+      final ageS = _now().difference(blob.updatedAt).inSeconds;
+      final aged = LocationResponsePayload(
+        targetPubkeyId: payload.targetPubkeyId,
+        latMicrodeg: payload.latMicrodeg,
+        lonMicrodeg: payload.lonMicrodeg,
+        accuracyM: payload.accuracyM,
+        beaconAgeS: ageS < 0 ? 0 : ageS,
+        zoneId: payload.zoneId,
+      );
+      _recordLocation(username, aged);
+      return aged;
+    } on OnlineException catch (e) {
+      if (!e.notFound) _log('online location fetch failed: $e');
+      return null;
+    } on FormatException catch (e) {
+      _log('undecodable online location blob: $e');
+      return null;
+    }
   }
 
   // ---- inbound demux (fed by the chat screen's single pipeline) ----
@@ -553,19 +742,23 @@ class FriendService extends ChangeNotifier {
     final entry = _entryByPubkeyId(payload.targetPubkeyId);
     if (entry == null) return true; // answer about nobody we know
     final username = entry.record.peerUsername;
+    _recordLocation(username, payload);
 
-    final fixAt =
-        _now().subtract(Duration(seconds: payload.beaconAgeS));
+    final pending = _pendingQueries[username];
+    if (pending != null && !pending.isCompleted) pending.complete(payload);
+    return true;
+  }
+
+  /// Freshest-wins location cache shared by every answer source — mesh
+  /// responses (live phone or node cache) and online blobs alike.
+  void _recordLocation(String username, LocationResponsePayload payload) {
+    final fixAt = _now().subtract(Duration(seconds: payload.beaconAgeS));
     final priorFixAt = _lastFixAt[username];
     if (priorFixAt == null || fixAt.isAfter(priorFixAt)) {
       lastKnownLocation[username] = payload;
       _lastFixAt[username] = fixAt;
       notifyListeners();
     }
-
-    final pending = _pendingQueries[username];
-    if (pending != null && !pending.isCompleted) pending.complete(payload);
-    return true;
   }
 
   FriendEntry? _entryByPubkeyId(Uint8List id) {
@@ -591,6 +784,141 @@ class FriendService extends ChangeNotifier {
       notifyListeners();
     }
     return true;
+  }
+
+  // ---- inbound online path (fed by OnlineService) ----
+
+  /// A store-and-forward relay body: [1-byte msgType][wire payload] — the
+  /// exact sealed payloads the mesh carries, minus the signed envelope.
+  /// Sender authenticity online is the account bearer token (the backend
+  /// stamps `from_user`); content stays sealed to our X25519 key either way,
+  /// and mutual consent still gates everything.
+  @override
+  Future<void> onOnlineRelay(String fromUser, Uint8List body) async {
+    if (body.isEmpty) return;
+    final payload = Uint8List.sublistView(body, 1);
+    switch (body[0]) {
+      case msgTypeDirectMessage:
+        final entry = store.byUsername(fromUser);
+        if (entry == null || entry.record.state != FriendshipState.friends) {
+          _log('online DM from non-friend — dropped');
+          return;
+        }
+        final String text;
+        try {
+          text = await decodeDirectMessage(payload, encryption.keyPair);
+        } catch (e) {
+          _log('undecodable online DM: $e');
+          return;
+        }
+        entry.addMessage(DirectMessage(
+            text: text, outgoing: false, at: _now(), via: DmVia.online));
+        await store.put(entry);
+        notifyListeners();
+      case msgTypeFriendAccept:
+        // Capability-token delivery/refresh (the sealed accept payload).
+        final FriendAcceptPayload accept;
+        try {
+          accept = await decodeFriendAccept(payload, encryption.keyPair);
+        } catch (e) {
+          _log('undecodable online FRIEND_ACCEPT: $e');
+          return;
+        }
+        final entry = store.byUsername(fromUser);
+        if (entry == null) return;
+        // TOFU: the sealed payload's keys must match what we pinned — a
+        // mismatch is impersonation, never a key update (same rule as mesh).
+        if (_hex(entry.record.peerEd25519Pub) != _hex(accept.ed25519Pub) ||
+            accept.username != fromUser) {
+          _log('online FRIEND_ACCEPT key/name differs from pinned — dropped');
+          return;
+        }
+        final (next, _) = _tryTransition(entry.record, FriendEvent.recvAccept);
+        if (next == null) return;
+        entry.record = next;
+        if (accept.capabilityToken != null) {
+          entry.theirTokenToMe = accept.capabilityToken;
+        }
+        await store.put(entry);
+        unawaited(_mirror(next));
+        notifyListeners();
+      default:
+        _log('online relay with unknown type ${body[0]} — dropped');
+    }
+  }
+
+  /// Friend-request state may have changed server-side: sync the pending
+  /// lists both ways. Runs on the push events and on every poll cycle.
+  @override
+  Future<void> onFriendEvent() async {
+    final online = _online;
+    final me = store.ownUsername;
+    if (online == null || !online.connected || me == null) return;
+    final PendingRequests pending;
+    try {
+      pending = await online.client.pendingFriendRequests();
+    } on OnlineException catch (e) {
+      _log('friend-request sync failed: $e');
+      return;
+    }
+
+    // Inbound: surface new requests for explicit consent (never
+    // auto-accepted), pinning keys from the directory (TOFU).
+    for (final username in pending.incoming) {
+      final existing = store.byUsername(username);
+      if (existing != null &&
+          existing.record.state != FriendshipState.none) {
+        continue; // already tracked (perhaps it also arrived over the mesh)
+      }
+      final DirectoryEntry resolved;
+      try {
+        resolved = await directory.resolve(username);
+      } on DirectoryException catch (e) {
+        _log('cannot resolve online requester $username: $e');
+        continue;
+      }
+      final record = FriendshipRecord(
+        peerUsername: resolved.username,
+        peerCurve25519Pub: resolved.curve25519Pub, // TOFU pin
+        peerEd25519Pub: resolved.ed25519Pub,
+      );
+      final (next, _) = _tryTransition(record, FriendEvent.recvRequest);
+      if (next == null) continue;
+      await store.put(FriendEntry(record: next));
+      notifyListeners();
+    }
+
+    // Outbound: a request we delivered online that is no longer pending was
+    // answered — friends in the mirror means accepted, otherwise declined.
+    // (Requests never delivered online say nothing here; the mesh answer
+    // arrives as a FRIEND_ACCEPT/DECLINE message.)
+    final stillPending = pending.outgoing.toSet();
+    final answered = [
+      for (final e in store.entries)
+        if (e.record.state == FriendshipState.requested &&
+            e.requestSentOnline &&
+            !stillPending.contains(e.record.peerUsername))
+          e
+    ];
+    if (answered.isEmpty) return;
+    final Map<String, String> states;
+    try {
+      states = await online.client.friendshipStates(me);
+    } on OnlineException catch (e) {
+      _log('friendship-state sync failed: $e');
+      return;
+    }
+    for (final entry in answered) {
+      final username = entry.record.peerUsername;
+      final event = states[username] == 'friends'
+          ? FriendEvent.recvAccept
+          : FriendEvent.recvDecline;
+      final (next, _) = _tryTransition(entry.record, event);
+      if (next == null) continue;
+      entry.record = next;
+      await store.put(entry);
+      notifyListeners();
+    }
   }
 
   // ---- internals ----
@@ -620,6 +948,17 @@ class FriendService extends ChangeNotifier {
       entry.record.peerCurve25519Pub,
     );
     await _sendToPeers(msgTypeFriendAccept, payload);
+    // Same sealed payload through the online relay, so a grant/refresh
+    // reaches a friend we never meet on the mesh.
+    final online = _online;
+    if (online != null && online.connected) {
+      try {
+        await online.client.sendRelay(entry.record.peerUsername,
+            Uint8List.fromList([msgTypeFriendAccept, ...payload]));
+      } on OnlineException catch (e) {
+        _log('online token delivery failed: $e');
+      }
+    }
   }
 
   /// Hourly: re-mint any of my tokens inside the refresh margin and
@@ -665,6 +1004,46 @@ class FriendService extends ChangeNotifier {
         position.accuracyM.round().clamp(0, 0xFFFF),
       ),
     );
+    // Same cadence feeds the online side: one sealed blob per sharing
+    // friend, latest-only server-side.
+    await _uploadLocationBlobs(position: position);
+  }
+
+  /// Replace my server-side location blobs with the current sharing set —
+  /// one coordinate sealed per friend (the server can't read them). An empty
+  /// set is uploaded even without a GPS fix: that IS the online revoke.
+  Future<void> _uploadLocationBlobs(
+      {({double lat, double lon, double accuracyM})? position}) async {
+    final online = _online;
+    if (online == null || !online.connected) return;
+    final sharing = [
+      for (final e in store.entries)
+        if (e.record.locationSharingEnabled) e
+    ];
+    final blobs = <String, Uint8List>{};
+    if (sharing.isNotEmpty) {
+      position ??= await _readPosition();
+      if (position == null) return; // no fix — keep whatever is up there
+      for (final entry in sharing) {
+        blobs[entry.record.peerUsername] = await encodeLocationResponse(
+          LocationResponsePayload(
+            targetPubkeyId: _myHint,
+            latMicrodeg: (position.lat * 1e6).round(),
+            lonMicrodeg: (position.lon * 1e6).round(),
+            accuracyM: position.accuracyM.round().clamp(0, 0xFFFF),
+            beaconAgeS: 0, // fresh at upload; age derives from updated_at
+            zoneId: broadcastZone,
+          ),
+          pubkeyId(entry.record.peerEd25519Pub),
+          entry.record.peerCurve25519Pub,
+        );
+      }
+    }
+    try {
+      await online.client.putLocationBlobs(blobs);
+    } on OnlineException catch (e) {
+      _log('location blob upload failed: $e');
+    }
   }
 
   /// Returns how many peers actually took the packet (0 = not transmitted).

@@ -32,6 +32,10 @@ class CapturingTransport implements Transport {
   final List<Uint8List> sent = [];
   ReceiveCallback? receiveCallback;
 
+  /// Who is in radio range. Empty = an empty cell, where a send reaches
+  /// nobody and the packet is simply gone.
+  List<String> peers = ['node-1'];
+
   @override
   Future<void> start() async {}
 
@@ -46,7 +50,7 @@ class CapturingTransport implements Transport {
   void onReceive(ReceiveCallback callback) => receiveCallback = callback;
 
   @override
-  List<String> listPeers() => ['node-1'];
+  List<String> listPeers() => peers;
 
   List<Uint8List> drain() {
     final out = List<Uint8List>.from(sent);

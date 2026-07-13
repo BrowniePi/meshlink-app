@@ -13,7 +13,9 @@ enum DmStatus { sending, relayed, failed }
 /// Which transport carried a DM — the per-message half of the online/mesh
 /// indicator. Online messages ride the backend relay as sealed ciphertext;
 /// mesh messages spray-and-wait over BLE/WiFi. Same crypto either way.
-enum DmVia { mesh, online }
+/// [both] = the sealed payload went out on the two transports at once (the
+/// receiver dedups on the ciphertext, so it still lands exactly once).
+enum DmVia { mesh, online, both }
 
 /// One direct message in a conversation, as this phone saw it. Plaintext
 /// lives on the phones only — the backend relay carries sealed ciphertext
@@ -40,6 +42,12 @@ class DirectMessage {
 /// Newest messages kept per friend — bounds the secure-storage blob.
 const int maxDmHistory = 200;
 
+/// Newest inbound DM dedup keys kept per friend. A message sent
+/// simultaneously online and over the mesh arrives (up to) twice; the key —
+/// a hash of the sealed ciphertext, identical on both transports — lets the
+/// second copy be dropped. Bounded well above any realistic in-flight window.
+const int maxSeenDmKeys = 64;
+
 /// Persisted state for one friend: the state-machine record plus the two
 /// capability tokens in play (mine-to-them, theirs-to-me), the DM
 /// conversation, and bookkeeping for accept/decline.
@@ -51,18 +59,36 @@ class FriendEntry {
     this.pendingRequestMsgId,
     this.requestSentOnline = false,
     List<DirectMessage>? messages,
-  }) : messages = messages ?? [];
+    List<String>? seenDmKeys,
+  })  : messages = messages ?? [],
+        seenDmKeys = seenDmKeys ?? [];
 
   FriendshipRecord record;
 
   /// DM history with this friend, oldest first, capped at [maxDmHistory].
   final List<DirectMessage> messages;
 
+  /// Dedup keys of recent inbound DMs, oldest first, capped at
+  /// [maxSeenDmKeys] — see [markDmSeen].
+  final List<String> seenDmKeys;
+
   void addMessage(DirectMessage message) {
     messages.add(message);
     if (messages.length > maxDmHistory) {
       messages.removeRange(0, messages.length - maxDmHistory);
     }
+  }
+
+  /// Record an inbound DM's dedup key. Returns false when the key was
+  /// already seen — the same message arrived on the other transport — in
+  /// which case the copy must be dropped.
+  bool markDmSeen(String key) {
+    if (seenDmKeys.contains(key)) return false;
+    seenDmKeys.add(key);
+    if (seenDmKeys.length > maxSeenDmKeys) {
+      seenDmKeys.removeRange(0, seenDmKeys.length - maxSeenDmKeys);
+    }
+    return true;
   }
 
   /// Token I minted granting THEM my location — resent on refresh.
@@ -125,6 +151,7 @@ class FriendStore {
         theirTokenToMe: _optBytes(m['their_token']),
         pendingRequestMsgId: _optBytes(m['pending_msg_id']),
         requestSentOnline: m['sent_online'] as bool? ?? false,
+        seenDmKeys: (m['seen_dm'] as List? ?? []).cast<String>(),
         messages: [
           for (final d in (m['messages'] as List? ?? []).cast<Map<String, dynamic>>())
             DirectMessage(
@@ -184,6 +211,7 @@ class FriendStore {
               ? null
               : _hex(e.pendingRequestMsgId!),
           'sent_online': e.requestSentOnline,
+          'seen_dm': e.seenDmKeys,
           'messages': [
             for (final d in e.messages)
               {

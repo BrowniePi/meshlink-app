@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -19,6 +20,7 @@ import 'identity/device_identity.dart';
 import 'identity/encryption_identity.dart';
 import 'identity/secure_storage.dart';
 import 'identity/token_storage.dart';
+import 'notifications/notification_service.dart';
 import 'onboarding/attestation_flow.dart';
 import 'online/online_client.dart';
 import 'online/online_service.dart';
@@ -89,6 +91,13 @@ Future<void> main() async {
     config: BackendConfig.fromEnvironment,
   );
 
+  // Notifications: local banners for messages/requests that arrive over the
+  // mesh or the online socket while backgrounded, FCM push for when the app
+  // is not running at all. FCM degrades to a no-op until Firebase config
+  // files are added (see docs/notifications.md).
+  final notifications = NotificationService();
+  await notifications.init();
+
   // The welcome/onboarding intro is shown once, after the first verified
   // login. Persisted so returning users skip it.
   final welcomeSeen = await storage.read(_welcomeSeenKey) == 'true';
@@ -105,6 +114,7 @@ Future<void> main() async {
     tokenStorage: tokenStorage,
     authService: authService,
     onlineService: onlineService,
+    notifications: notifications,
     eventStore: eventStore,
     backendChannel: backendChannel,
     backendClient: backendClient,
@@ -153,6 +163,7 @@ class MeshLinkApp extends StatefulWidget {
     required this.tokenStorage,
     required this.authService,
     required this.onlineService,
+    required this.notifications,
     required this.eventStore,
     required this.backendChannel,
     required this.backendClient,
@@ -167,6 +178,7 @@ class MeshLinkApp extends StatefulWidget {
   final TokenStorage tokenStorage;
   final AuthService authService;
   final OnlineService onlineService;
+  final NotificationService notifications;
   final EventStore eventStore;
   final NodeBackendChannel backendChannel;
   final MeshBackendClient backendClient;
@@ -249,10 +261,40 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
     // Online mode rides the login session: the push socket authenticates
     // with the account's access token, so it runs exactly while logged in.
     _friends.attachOnline(widget.onlineService);
+    // Notifications: banner inbound DMs/requests when backgrounded, and let
+    // an FCM wake-up trigger an immediate inbox poll while foregrounded.
+    _friends.onDmReceived = (from, text, key) => unawaited(widget.notifications
+        .notifyDm(fromUser: from, text: text, dedupKey: key));
+    _friends.onFriendRequestReceived =
+        (from) => unawaited(widget.notifications.notifyFriendRequest(from));
+    widget.notifications.onForegroundPush =
+        () => unawaited(widget.onlineService.pollNow());
+    _tokenRefreshSub = widget.notifications.onTokenRefresh
+        .listen((_) => unawaited(_registerPushToken()));
     _syncOnlineLifecycle();
     unawaited(_friends.init().then((_) {
       if (mounted) setState(() => _friendsReady = true);
     }));
+  }
+
+  /// Subscription to FCM token rotation → re-register with the backend.
+  StreamSubscription<String>? _tokenRefreshSub;
+
+  /// Whether this login session has registered its FCM token server-side.
+  bool _pushRegistered = false;
+
+  Future<void> _registerPushToken() async {
+    if (!widget.authService.isLoggedIn) return;
+    final token = await widget.notifications.fcmToken();
+    if (token == null) return; // Firebase not configured — mesh-only banners
+    try {
+      await widget.onlineService.client
+          .registerPushToken(token, Platform.isIOS ? 'ios' : 'android');
+      _pushRegistered = true;
+    } on OnlineException {
+      // Retried on the next auth/connectivity change; pushes just start late.
+      _pushRegistered = false;
+    }
   }
 
   void _onAuthChanged() {
@@ -263,8 +305,16 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
   void _syncOnlineLifecycle() {
     if (widget.authService.isLoggedIn) {
       widget.onlineService.start();
+      if (!_pushRegistered) unawaited(_registerPushToken());
     } else {
       widget.onlineService.stop();
+      if (_pushRegistered) {
+        // Logged out: the account session is already gone, so instead of an
+        // authenticated unregister, kill the FCM token itself — the backend
+        // prunes dead tokens when a push bounces.
+        unawaited(widget.notifications.deleteToken());
+        _pushRegistered = false;
+      }
     }
   }
 
@@ -334,6 +384,7 @@ class _MeshLinkAppState extends State<MeshLinkApp> {
   void dispose() {
     _batteryTier.tier.removeListener(_onTierChanged);
     _batteryTier.stop();
+    _tokenRefreshSub?.cancel();
     widget.authService.removeListener(_onAuthChanged);
     widget.onlineService.stop();
     _friends.dispose();

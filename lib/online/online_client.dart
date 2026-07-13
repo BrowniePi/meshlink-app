@@ -206,6 +206,23 @@ class OnlineClient {
     if (r.statusCode != 200) _fail(r, 'ack');
   }
 
+  // ---- push notifications ----
+
+  /// Bind this device's FCM registration token to my account so the backend
+  /// can push "new message" wake-ups. Upsert — safe to call on every login
+  /// and token rotation.
+  Future<void> registerPushToken(String token, String platform) async {
+    final r = await _rpc('register_push_token',
+        {'push_token': token, 'platform': platform});
+    if (r.statusCode != 200) _fail(r, 'push token register');
+  }
+
+  /// Unbind on logout so a signed-out device stops getting pushes.
+  Future<void> unregisterPushToken(String token) async {
+    final r = await _rpc('unregister_push_token', {'push_token': token});
+    if (r.statusCode != 200) _fail(r, 'push token unregister');
+  }
+
   // ---- sealed location ----
 
   /// Replace ALL my blobs — one per friend currently shared with. An empty

@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:meshlink_app/config/backend_config.dart';
+import 'package:meshlink_app/core/pipeline.dart';
 import 'package:meshlink_app/friends/friend_state.dart';
 import 'package:meshlink_app/friends/friend_store.dart';
 import 'package:meshlink_app/online/online_client.dart';
@@ -66,11 +67,11 @@ void main() {
     await aliceOnline.pollNow();
   }
 
-  test('friend request goes via the backend when online — no mesh spray',
+  test('friend request goes to the backend AND the mesh simultaneously',
       () async {
     final reached = await alice.friends.sendFriendRequest('bob');
-    expect(reached, 1);
-    expect(alice.transport.sent, isEmpty); // nothing sprayed
+    expect(reached, 2); // the backend + one mesh peer
+    expect(alice.transport.sent, isNotEmpty); // sprayed too
     expect(backend.pendingFor('bob'), ['alice']);
 
     // Bob's poll surfaces it as an ordinary pending request (explicit
@@ -97,7 +98,7 @@ void main() {
 
     expect(alice.friends.isOnline, isFalse);
     expect(alice.friends.canReachBackend, isTrue);
-    expect(await alice.friends.sendFriendRequest('bob'), 1);
+    expect(await alice.friends.sendFriendRequest('bob'), 2);
     await bobOnline.pollNow();
     expect(bob.friends.receivedRequests.single.record.peerUsername, 'alice');
 
@@ -177,9 +178,9 @@ void main() {
     await bob.friends.sendDirectMessage('alice', 'see you at the gate');
 
     final sent = bob.friends.store.byUsername('alice')!.messages.single;
-    expect(sent.via, DmVia.online);
+    expect(sent.via, DmVia.both); // backend AND mesh, simultaneously
     expect(sent.status, DmStatus.relayed);
-    expect(bob.transport.sent, isEmpty); // never sprayed
+    expect(bob.transport.sent, isNotEmpty); // the mesh copy
 
     // The server saw only ciphertext.
     expect(backend.lastCiphertext, isNotNull);
@@ -196,7 +197,7 @@ void main() {
     expect(backend.inboxFor('alice'), isEmpty);
   });
 
-  test('DM falls back to the mesh when the relay rejects', () async {
+  test('DM still goes out over the mesh when the relay rejects', () async {
     await befriendOnline();
     backend.failMessages = true;
     await bob.friends.sendDirectMessage('alice', 'radio it is');
@@ -204,6 +205,66 @@ void main() {
     expect(sent.via, DmVia.mesh);
     expect(sent.status, DmStatus.relayed); // a peer took the packet
     expect(bob.transport.sent, isNotEmpty);
+  });
+
+  test('a DM arriving over BOTH transports lands exactly once (online first)',
+      () async {
+    await befriendOnline();
+    bob.transport.drain();
+    final notified = <String>[];
+    alice.friends.onDmReceived = (from, text, key) => notified.add(key);
+
+    await bob.friends.sendDirectMessage('alice', 'double delivery');
+    await aliceOnline.pollNow(); // online copy lands first...
+    await bob.deliverTo(alice); // ...then the mesh copy of the SAME message
+
+    final got = alice.friends.store.byUsername('bob')!.messages;
+    expect(got, hasLength(1));
+    expect(got.single.text, 'double delivery');
+    expect(notified, hasLength(1)); // one notification, not two
+  });
+
+  test('a DM arriving over BOTH transports lands exactly once (mesh first)',
+      () async {
+    await befriendOnline();
+    bob.transport.drain();
+
+    await bob.friends.sendDirectMessage('alice', 'double delivery');
+    await bob.deliverTo(alice); // mesh copy lands first...
+    await aliceOnline.pollNow(); // ...then the online copy
+
+    final got = alice.friends.store.byUsername('bob')!.messages;
+    expect(got, hasLength(1));
+    expect(got.single.text, 'double delivery');
+  });
+
+  test('dedup keys survive an app relaunch', () async {
+    await befriendOnline();
+    bob.transport.drain();
+    await bob.friends.sendDirectMessage('alice', 'persist me');
+    final meshCopies = bob.transport.drain();
+    await aliceOnline.pollNow(); // online copy lands and is recorded
+
+    // Relaunch alice's phone on the same storage; the mesh copy of the
+    // pre-relaunch message must still be recognized as a duplicate.
+    final alice2 = await FakePhone.createWithStorage(alice.storage, registry);
+    for (final packet in meshCopies) {
+      final result = await alice2.pipeline.process(packet);
+      if (result.outcome == Outcome.deliver) {
+        await alice2.friends.handleMessage(result.message!);
+      }
+    }
+    expect(alice2.friends.store.byUsername('bob')!.messages, hasLength(1));
+    alice2.friends.dispose();
+  });
+
+  test('a friend request arriving over BOTH transports lands once', () async {
+    await alice.friends.sendFriendRequest('bob'); // backend + mesh spray
+    await bobOnline.pollNow(); // online copy first
+    await alice.deliverTo(bob); // mesh copy second — must be ignored
+
+    expect(bob.friends.receivedRequests, hasLength(1));
+    expect(bob.friends.receivedRequests.single.record.peerUsername, 'alice');
   });
 
   test('enabling sharing uploads a sealed blob the friend can open',

@@ -357,9 +357,10 @@ class _ChatPanelState extends State<ChatPanel> {
                 children: [
                   Text(time,
                       style: TextStyle(fontSize: 10, color: c.faint)),
-                  // Transport badge: cloud = carried by the online backend,
-                  // no badge = sprayed over the mesh (the default story).
-                  if (m.via == DmVia.online) ...[
+                  // Transport badge: cloud = the online backend carried it
+                  // (alone or alongside a mesh spray), no badge = mesh only
+                  // (the default story).
+                  if (m.via != DmVia.mesh) ...[
                     const SizedBox(width: 4),
                     Icon(Icons.cloud_outlined, size: 12, color: c.faint),
                   ],

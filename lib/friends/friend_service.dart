@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 
 import '../core/capability_token.dart';
@@ -45,11 +46,13 @@ typedef PositionReader = Future<({double lat, double lon, double accuracyM})?>
 /// Orchestrates the four friendship flows over the mesh AND the online
 /// backend: request/accept (mutual consent), per-friend location sharing
 /// (capability tokens offline, sealed blobs online), and friend-location
-/// queries. Online is primary whenever the backend push socket is up
-/// ([attachOnline]); the mesh is the fallback — and the only path — when it
-/// isn't. Pure protocol logic lives in the core ports (friend_state /
-/// capability_token / friend_wire); this class does I/O and persistence and
-/// notifies the UI.
+/// queries. Friend requests and DMs go out on BOTH transports at once when
+/// the backend is reachable ([attachOnline]) — the receiving device may be
+/// on the mesh but not online, or the reverse — and the receiver dedups the
+/// second copy by ciphertext hash. Location reads are online-first with the
+/// mesh as fallback. Pure protocol logic lives in the core ports
+/// (friend_state / capability_token / friend_wire); this class does I/O and
+/// persistence and notifies the UI.
 class FriendService extends ChangeNotifier implements OnlineHandler {
   FriendService({
     required this.store,
@@ -88,8 +91,19 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
 
   /// The online (backend) channel, attached post-construction like
   /// [presentAttestation] — null in mesh-only tests. While its socket is up,
-  /// online is the primary transport for friend requests, DMs and location.
+  /// friend requests and DMs go out on it AND the mesh simultaneously (the
+  /// receiver may be mesh-reachable but offline, or vice versa); location
+  /// reads stay online-first with the mesh as fallback.
   OnlineService? _online;
+
+  /// Fired after an inbound DM lands (either transport, post-dedup) — the
+  /// notification hook. [dedupKey] is the ciphertext hash, the same key an
+  /// FCM push for this message carries, so the notifier can de-duplicate.
+  void Function(String fromUsername, String text, String dedupKey)?
+      onDmReceived;
+
+  /// Fired when an inbound friend request first appears (either transport).
+  void Function(String fromUsername)? onFriendRequestReceived;
 
   /// Wire the online channel in and become its event handler. Connectivity
   /// flips are re-broadcast to our own listeners so the UI indicator updates
@@ -183,10 +197,12 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
 
   /// "Add friend": resolve the username, pin their keys locally (TOFU — a
   /// later directory answer never overwrites what we pinned), then deliver
-  /// the request — via the backend when online (primary; the server holds it
-  /// until the friend sees it), sprayed over the mesh otherwise.
+  /// the request BOTH ways at once — to the backend (the server holds it
+  /// until the friend sees it) and sprayed over the mesh (the friend may be
+  /// in radio range but offline). The duplicate is harmless: the receiving
+  /// state machine ignores a second recvRequest.
   ///
-  /// Returns how many carriers took the request (peers, or 1 for the
+  /// Returns how many carriers took the request (peers + 1 for the
   /// backend). Zero is not a failure — the request stays in
   /// [FriendshipState.requested] and [resendPendingRequests] retries — but
   /// the caller should say so rather than claim it was delivered.
@@ -194,12 +210,16 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     final existing = store.byUsername(username);
     if (existing != null) {
       if (existing.record.state == FriendshipState.requested) {
-        if (existing.requestSentOnline && canReachBackend) return 1;
-        if (await _sendRequestOnline(existing)) {
-          await store.put(existing);
-          return 1;
+        var reached = 0;
+        if (!existing.requestSentOnline || !canReachBackend) {
+          if (await _sendRequestOnline(existing)) {
+            await store.put(existing);
+            reached = 1;
+          }
+        } else {
+          reached = 1; // server already holds it
         }
-        return _sprayRequest(existing.record);
+        return reached + await _sprayRequest(existing.record);
       }
       if (existing.record.state == FriendshipState.friends) {
         throw DirectoryException('You are already friends with @$username');
@@ -224,9 +244,8 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     if (await _sendRequestOnline(entry)) {
       _lastRequestSentAt[next.peerUsername] = _now();
       reached = 1;
-    } else {
-      reached = await _sprayRequest(next);
     }
+    reached += await _sprayRequest(next);
     await store.put(entry);
     notifyListeners();
     return reached;
@@ -248,19 +267,16 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
   }
 
   /// Retry any outbound request the peer has not answered yet. Called on
-  /// the UI poll cycle. Online-delivered requests sit on the server and need
-  /// no retry; anything else is re-POSTed once we're online, and re-sprayed
-  /// over the mesh regardless (the first send may have reached nobody, and
-  /// there is no delivery receipt that would tell us either way).
+  /// the UI poll cycle. A request not yet delivered online is re-POSTed once
+  /// we're online; the mesh re-spray keeps going regardless — the server
+  /// holding the request only reaches a friend who comes online, not one in
+  /// radio range, and the mesh has no delivery receipt either way.
   Future<void> resendPendingRequests() async {
     for (final entry in store.entries) {
       if (entry.record.state != FriendshipState.requested) continue;
       if (!entry.requestSentOnline && await _sendRequestOnline(entry)) {
         await store.put(entry);
-        _lastRequestSentAt[entry.record.peerUsername] = _now();
-        continue;
       }
-      if (entry.requestSentOnline && canReachBackend) continue; // server holds it
       final last = _lastRequestSentAt[entry.record.peerUsername];
       if (last != null && _now().difference(last) < requestResendInterval) {
         continue;
@@ -441,12 +457,14 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
 
   // ---- flow 5: direct messages ----
 
-  /// Send [text] to a friend, sealed to their pinned X25519 key. Online is
-  /// primary: the backend stores the ciphertext until the friend's next
-  /// poll (it never sees the text). Offline — or if the relay rejects — the
-  /// message sprays over the mesh exactly as before. The local copy is
+  /// Send [text] to a friend, sealed to their pinned X25519 key — once —
+  /// then hand the SAME ciphertext to both transports at the same time: the
+  /// backend stores it until the friend's next poll (it never sees the
+  /// text), and the mesh sprays it in case the friend is in radio range but
+  /// offline. Whichever copy lands second is dropped by the receiver's
+  /// ciphertext-hash dedup ([FriendEntry.markDmSeen]). The local copy is
   /// appended immediately with [DmStatus.sending], then flipped to
-  /// [DmStatus.relayed] once a carrier took it ([DmStatus.failed] when
+  /// [DmStatus.relayed] once any carrier took it ([DmStatus.failed] when
   /// neither the backend nor any peer was reachable).
   Future<void> sendDirectMessage(String username, String text) async {
     final entry = store.byUsername(username);
@@ -463,22 +481,24 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     entry.addMessage(message);
     notifyListeners();
     final online = _online;
-    var sent = false;
+    var viaOnline = false;
     if (online != null && online.canRequest) {
       try {
         await online.client.sendRelay(username,
             Uint8List.fromList([msgTypeDirectMessage, ...payload]));
-        message.via = DmVia.online;
-        sent = true;
+        viaOnline = true;
       } on OnlineException catch (e) {
-        _log('online DM failed ($e) — mesh fallback');
+        _log('online DM failed ($e) — mesh only');
       }
     }
-    if (!sent) {
-      message.via = DmVia.mesh;
-      sent = await _sendToPeers(msgTypeDirectMessage, payload) > 0;
-    }
-    message.status = sent ? DmStatus.relayed : DmStatus.failed;
+    final viaMesh = await _sendToPeers(msgTypeDirectMessage, payload) > 0;
+    message.via = viaOnline && viaMesh
+        ? DmVia.both
+        : viaOnline
+            ? DmVia.online
+            : DmVia.mesh;
+    message.status =
+        viaOnline || viaMesh ? DmStatus.relayed : DmStatus.failed;
     await store.put(entry);
     notifyListeners();
   }
@@ -626,6 +646,7 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
       pendingRequestMsgId: Uint8List.fromList(msg.msgId),
     ));
     notifyListeners();
+    onFriendRequestReceived?.call(payload.username);
     return true;
   }
 
@@ -692,9 +713,15 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
       _log('undecodable DIRECT_MESSAGE: $e');
       return true;
     }
+    final key = await _dmDedupKey(msgTypeDirectMessage, msg.payload);
+    if (!entry.markDmSeen(key)) {
+      _log('duplicate DM (already landed online) — dropped');
+      return true;
+    }
     entry.addMessage(DirectMessage(text: text, outgoing: false, at: _now()));
     await store.put(entry);
     notifyListeners();
+    onDmReceived?.call(entry.record.peerUsername, text, key);
     return true;
   }
 
@@ -862,10 +889,16 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
           _log('undecodable online DM: $e');
           return;
         }
+        final key = await _dmDedupKey(msgTypeDirectMessage, payload);
+        if (!entry.markDmSeen(key)) {
+          _log('duplicate DM (already landed via mesh) — dropped');
+          return;
+        }
         entry.addMessage(DirectMessage(
             text: text, outgoing: false, at: _now(), via: DmVia.online));
         await store.put(entry);
         notifyListeners();
+        onDmReceived?.call(fromUser, text, key);
       case msgTypeFriendAccept:
         // Capability-token delivery/refresh (the sealed accept payload).
         final FriendAcceptPayload accept;
@@ -943,6 +976,7 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
       if (next == null) continue;
       await store.put(FriendEntry(record: next));
       notifyListeners();
+      onFriendRequestReceived?.call(username);
     }
 
     // Supabase is the durable social graph. Reconcile every row on every
@@ -1056,6 +1090,16 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
       _log('ignored: $e');
       return (null, null);
     }
+  }
+
+  /// Cross-transport DM dedup key: SHA-256 (hex) over [msgType][sealed
+  /// payload] — exactly the relay body / ciphertext column server-side, so
+  /// the backend's FCM push and both local receive paths derive the same key
+  /// for one message. SHA-256 because Postgres (pgcrypto) computes it too.
+  Future<String> _dmDedupKey(int msgType, Uint8List payload) async {
+    final digest =
+        await Sha256().hash(Uint8List.fromList([msgType, ...payload]));
+    return _hex(digest.bytes);
   }
 
   Future<Uint8List> _mintToken(FriendshipRecord record) => issueToken(

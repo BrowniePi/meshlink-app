@@ -38,9 +38,14 @@ class _FriendsPanelState extends State<FriendsPanel> {
     if (username.startsWith('@')) username = username.substring(1);
     if (username.isEmpty) return;
     try {
-      await _c.friends.sendFriendRequest(username);
+      final reached = await _c.friends.sendFriendRequest(username);
       setState(() {
-        _notice = 'Friend request sent to @$username';
+        // The mesh gives no delivery receipt, so "sent" can only ever mean
+        // "some peer took it". Reaching nobody is the honest common case in
+        // an empty cell — the service keeps re-spraying until they answer.
+        _notice = reached > 0
+            ? 'Friend request sent to @$username'
+            : 'No devices in range — @$username will get it when one is';
         _search.clear();
       });
     } on DirectoryException catch (e) {

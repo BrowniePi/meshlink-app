@@ -6,6 +6,13 @@ Mutual Consent / Node-Served Location). Counterpart notes:
 `MeshLink-Node/docs/node-served-location.md` (node),
 `Meshlink-backend/docs/friendship-directory.md` (directory).
 
+> **2026-07, online mode:** this document describes the mesh paths, which
+> are now the *fallback*. With internet available, friend requests, DMs
+> (still sealed — the backend relays ciphertext it cannot read) and
+> location (sealed per-friend blobs) go through the backend first. See
+> `docs/online-mode.md` for the routing table; everything below still holds
+> whenever the phone is offline.
+
 ## The four flows
 
 1. **Create account** — `onboarding/account_screen.dart`, inserted after

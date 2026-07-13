@@ -397,11 +397,19 @@ class _FireflyHomeState extends State<FireflyHome>
     return (groups: groups, singles: singles);
   }
 
+  /// Status line under the wordmark — the mode indicator. "Online" means
+  /// the backend push socket is up and carries friend requests, DMs and
+  /// location; the mesh part describes the radio side, which keeps relaying
+  /// either way.
   String _meshStatus() {
-    if (_c.strength == LinkStrength.offline) return 'Direct radio only';
+    final online = widget.friendService.isOnline;
+    if (_c.strength == LinkStrength.offline) {
+      return online ? 'Online · no mesh peers' : 'Direct radio only';
+    }
     final node = _c.nodeInfo?.name;
     final n = _c.peers.length;
-    return '${node != null ? 'Via $node' : 'On mesh'}'
+    return '${online ? 'Online · ' : 'Mesh only · '}'
+        '${node != null ? 'via $node' : 'on mesh'}'
         ' · $n peer${n == 1 ? '' : 's'}'
         '${_c.wifiOn ? ' · turbo' : ''}';
   }
@@ -471,11 +479,18 @@ class _FireflyHomeState extends State<FireflyHome>
           interactionOptions: const InteractionOptions(
               flags: InteractiveFlag.all & ~InteractiveFlag.rotate),
           onMapEvent: (e) {
-            if (e.source != MapEventSource.mapController) {
-              _mapTouched = true;
-              _moved = 0;
-              _wakeMap();
+            // Layout events (first build, rotation, keyboard) are not the
+            // user exploring: flutter_map fires nonRotatedSizeChange as soon
+            // as the map gets its constraints, which would otherwise mark the
+            // camera "touched" before the first GPS fix even lands and cancel
+            // the snap to our own position.
+            if (e.source == MapEventSource.mapController ||
+                e.source == MapEventSource.nonRotatedSizeChange) {
+              return;
             }
+            _mapTouched = true;
+            _moved = 0;
+            _wakeMap();
           },
         ),
         children: [

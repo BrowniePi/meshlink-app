@@ -7,6 +7,7 @@ import 'package:meshlink_app/core/message.dart';
 import 'package:meshlink_app/core/message_factory.dart';
 import 'package:meshlink_app/core/pipeline.dart';
 import 'package:meshlink_app/friends/directory_client.dart';
+import 'package:meshlink_app/friends/friend_service.dart';
 import 'package:meshlink_app/friends/friend_state.dart';
 import 'package:meshlink_app/friends/friend_store.dart';
 
@@ -69,6 +70,54 @@ void main() {
     // Friendship never auto-shares location (separate consent).
     expect(alice.friends.friends.single.record.locationSharingEnabled, isFalse);
     expect(bob.friends.friends.single.record.locationSharingEnabled, isFalse);
+  });
+
+  test('a request sent into an empty cell is re-sprayed once a peer appears',
+      () async {
+    var clock = DateTime.utc(2026, 1, 1);
+    final ann = await FakePhone.create(registry, now: () => clock);
+    addTearDown(ann.friends.dispose);
+    await ann.friends.createAccount('ann');
+
+    // Nobody in radio range: the packet reaches no one and there is no
+    // delivery receipt that would say so.
+    ann.transport.peers = [];
+    expect(await ann.friends.sendFriendRequest('bob'), 0);
+    expect(ann.transport.sent, isEmpty);
+    await ann.deliverTo(bob);
+    expect(bob.friends.pendingRequests, isEmpty);
+
+    // The request is not lost — it is still ours to retry.
+    expect(ann.friends.store.byUsername('bob')!.record.state,
+        FriendshipState.requested);
+
+    // Re-sends are spaced out: nothing goes out again straight away.
+    ann.transport.peers = ['node-1'];
+    await ann.friends.resendPendingRequests();
+    expect(ann.transport.sent, isEmpty);
+
+    // Once the interval passes, the poll cycle re-sprays it and bob sees it.
+    clock = clock.add(requestResendInterval + const Duration(seconds: 1));
+    await ann.friends.resendPendingRequests();
+    await ann.deliverTo(bob);
+    expect(bob.friends.pendingRequests.map((e) => e.record.peerUsername),
+        ['ann']);
+  });
+
+  test('an answered request stops being re-sprayed', () async {
+    var clock = DateTime.utc(2026, 1, 1);
+    final ann = await FakePhone.create(registry, now: () => clock);
+    addTearDown(ann.friends.dispose);
+    await ann.friends.createAccount('ann');
+
+    await ann.friends.sendFriendRequest('bob');
+    await ann.deliverTo(bob);
+    await bob.friends.accept('ann');
+    await bob.deliverTo(ann);
+
+    clock = clock.add(requestResendInterval + const Duration(seconds: 1));
+    await ann.friends.resendPendingRequests();
+    expect(ann.transport.sent, isEmpty);
   });
 
   test('flow 2: decline returns the requester to none', () async {

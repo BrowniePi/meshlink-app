@@ -111,6 +111,17 @@ state lives on the phone (Keychain/Keystore) and mirrors to the backend
 best-effort — the mesh works with the backend down. Details and invariants:
 `docs/friendship-and-location.md`.
 
+### Online mode
+
+With internet available the app switches (automatically, with a visible
+`Online ·` status and per-message cloud badge) to the backend as the primary
+transport: friend requests are held server-side until the friend polls, DMs
+relay as sealed ciphertext (the server never sees text), and location shares
+upload one sealed blob per friend (latest coordinate only, unreadable
+server-side). Everything falls back to the mesh seamlessly when
+connectivity drops — and the mesh remains the only path inside an offline
+venue. Design and routing table: `docs/online-mode.md`.
+
 ## BLE plugin
 
 `flutter_blue_plus 2.3.10` (tested via `flutter analyze`/`flutter test` only —

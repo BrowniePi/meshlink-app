@@ -6,17 +6,25 @@ import 'friend_state.dart';
 
 /// Delivery progress of an outgoing DM. The mesh is best-effort
 /// spray-and-wait with no receipts, so the honest ceiling is [relayed]:
-/// the packet was handed to at least one peer. There is no "delivered".
+/// the packet was handed to at least one peer (or, online, the backend
+/// accepted it for store-and-forward). There is no "delivered".
 enum DmStatus { sending, relayed, failed }
 
-/// One direct message in a conversation, as this phone saw it. DMs live on
-/// the phones only — they never touch the backend or the node's storage.
+/// Which transport carried a DM — the per-message half of the online/mesh
+/// indicator. Online messages ride the backend relay as sealed ciphertext;
+/// mesh messages spray-and-wait over BLE/WiFi. Same crypto either way.
+enum DmVia { mesh, online }
+
+/// One direct message in a conversation, as this phone saw it. Plaintext
+/// lives on the phones only — the backend relay carries sealed ciphertext
+/// and deletes it on delivery.
 class DirectMessage {
   DirectMessage({
     required this.text,
     required this.outgoing,
     required this.at,
     this.status,
+    this.via = DmVia.mesh,
   });
   final String text;
   final bool outgoing;
@@ -24,6 +32,9 @@ class DirectMessage {
 
   /// Only meaningful for outgoing messages; null for incoming.
   DmStatus? status;
+
+  /// Transport that carried (or is carrying) this message.
+  DmVia via;
 }
 
 /// Newest messages kept per friend — bounds the secure-storage blob.
@@ -38,6 +49,7 @@ class FriendEntry {
     this.myTokenToThem,
     this.theirTokenToMe,
     this.pendingRequestMsgId,
+    this.requestSentOnline = false,
     List<DirectMessage>? messages,
   }) : messages = messages ?? [];
 
@@ -62,6 +74,12 @@ class FriendEntry {
 
   /// msg_id of their inbound FRIEND_REQUEST, referenced by a decline.
   Uint8List? pendingRequestMsgId;
+
+  /// Whether our outbound FRIEND_REQUEST reached the backend (online-primary
+  /// path). Distinguishes "vanished from the server's pending list because
+  /// it was answered" from "was never delivered online at all" — only the
+  /// former may be read as an accept/decline.
+  bool requestSentOnline;
 }
 
 /// Friends persistence: one JSON blob in the existing Keychain/Keystore
@@ -107,6 +125,7 @@ class FriendStore {
         myTokenToThem: _optBytes(m['my_token']),
         theirTokenToMe: _optBytes(m['their_token']),
         pendingRequestMsgId: _optBytes(m['pending_msg_id']),
+        requestSentOnline: m['sent_online'] as bool? ?? false,
         messages: [
           for (final d in (m['messages'] as List? ?? []).cast<Map<String, dynamic>>())
             DirectMessage(
@@ -116,6 +135,9 @@ class FriendStore {
               status: d['status'] == null
                   ? null
                   : DmStatus.values.byName(d['status'] as String),
+              via: d['via'] == null
+                  ? DmVia.mesh
+                  : DmVia.values.byName(d['via'] as String),
             ),
         ],
       );
@@ -149,6 +171,7 @@ class FriendStore {
           'pending_msg_id': e.pendingRequestMsgId == null
               ? null
               : _hex(e.pendingRequestMsgId!),
+          'sent_online': e.requestSentOnline,
           'messages': [
             for (final d in e.messages)
               {
@@ -156,6 +179,7 @@ class FriendStore {
                 'out': d.outgoing,
                 'at': d.at.millisecondsSinceEpoch,
                 'status': d.status?.name,
+                'via': d.via.name,
               }
           ],
         }

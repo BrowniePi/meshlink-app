@@ -8,8 +8,8 @@
 ///               --dart-define=MESHLINK_SUPABASE_ANON_KEY=eyJ... \
 ///               --dart-define=MESHLINK_EVENT_ID=summerfest-2026
 ///
-/// Defaults point at a local `supabase start` stack, so dev works without
-/// dart-defines once the CLI is running.
+/// Defaults point at the hosted Supabase project, so a plain `flutter run`
+/// on any device talks to the same backend.
 class BackendConfig {
   const BackendConfig({
     required this.baseUrl,
@@ -29,15 +29,15 @@ class BackendConfig {
 
   static const String _defaultAnonKey = String.fromEnvironment(
     'MESHLINK_SUPABASE_ANON_KEY',
-    // The well-known `supabase start` demo anon key (local dev only).
+    // The hosted project's anon key (safe to embed: RLS is the gate).
     defaultValue:
-        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0',
+        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jZW1yd21qbGNiY2lhbWRwc213Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM5MTMyODUsImV4cCI6MjA5OTQ4OTI4NX0.bO_0QPs4Ohz4Qy4GFRouE_E9w3_NtsZQzHnAa8J0rPA',
   );
 
   static const BackendConfig fromEnvironment = BackendConfig(
     baseUrl: String.fromEnvironment(
       'MESHLINK_BACKEND_URL',
-      defaultValue: 'http://127.0.0.1:54321',
+      defaultValue: 'https://ncemrwmjlcbciamdpsmw.supabase.co',
     ),
     eventId: String.fromEnvironment(
       'MESHLINK_EVENT_ID',

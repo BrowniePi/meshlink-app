@@ -25,6 +25,7 @@ class DebugLog extends ChangeNotifier {
   List<LogEntry> get entries => List.unmodifiable(_entries);
 
   void log(String tag, String message, {LogLevel level = LogLevel.info}) {
+    debugPrint('[$tag] $message');
     _entries.add(LogEntry(DateTime.now(), level, tag, message));
     if (_entries.length > _maxEntries) {
       _entries.removeRange(0, _entries.length - _maxEntries);

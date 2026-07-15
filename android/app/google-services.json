@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "774468638442",
+    "project_id": "firefly-chats",
+    "storage_bucket": "firefly-chats.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:774468638442:android:ad24629d7ba5d7b6bce993",
+        "android_client_info": {
+          "package_name": "com.meshlink.meshlink_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBpmfZ1JtnFnnLu891_WvMqcFOQaNestu4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

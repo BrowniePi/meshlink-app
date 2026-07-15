@@ -50,3 +50,6 @@ app.*.map.json
 __pycache__
 *.pyc
 .pytest_cache
+
+# Secrets
+service-account.json

@@ -231,7 +231,15 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
         throw DirectoryException('Friendship with @$username was revoked');
       }
     }
-    final resolved = await directory.resolve(username);
+    final DirectoryEntry resolved;
+    try {
+      _log('resolving @$username for new friend request…');
+      resolved = await directory.resolve(username);
+      _log('resolved @$username — keys pinned, proceeding to spray');
+    } catch (e) {
+      _log('resolve @$username FAILED ($e) — spray skipped (no keys)');
+      rethrow;
+    }
     final record = FriendshipRecord(
       peerUsername: resolved.username,
       peerCurve25519Pub: resolved.curve25519Pub,
@@ -240,12 +248,17 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     final (next, effects) = transition(record, FriendEvent.sendRequest);
     assert(effects.contains(FriendEffect.emitFriendRequest));
     final entry = FriendEntry(record: next);
+    // Same race as sendDirectMessage: spray first, don't let a slow or
+    // unreachable backend hold up the mesh path.
+    final onlineFuture = _sendRequestOnline(entry);
+    final sprayed = await _sprayRequest(next);
     var reached = 0;
-    if (await _sendRequestOnline(entry)) {
+    if (await onlineFuture) {
       _lastRequestSentAt[next.peerUsername] = _now();
       reached = 1;
     }
-    reached += await _sprayRequest(next);
+    _log('sprayed friend request to $sprayed mesh peer(s)');
+    reached += sprayed;
     await store.put(entry);
     notifyListeners();
     return reached;
@@ -337,17 +350,14 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
       pubkeyId(record.peerEd25519Pub),
       record.peerCurve25519Pub,
     );
-    await _sendToPeers(msgTypeFriendAccept, payload);
-    entry.record = record;
-    entry.myTokenToThem = token;
-    entry.pendingRequestMsgId = null;
-    await store.put(entry);
-    _syncBeaconLoop();
-    // The mirror runs first so the server-side friendship row exists before
-    // the online paths below (message relay requires it).
-    await _mirror(record);
-    final online = _online;
-    if (online != null && online.canRequest) {
+    // Mesh spray runs alongside the whole online chain below. Within that
+    // chain the order still matters: the mirror creates the server-side
+    // friendship row the relay requires, so it stays sequential there.
+    final meshFuture = _sendToPeers(msgTypeFriendAccept, payload);
+    final onlineFuture = () async {
+      await _mirror(record);
+      final online = _online;
+      if (online == null || !online.canRequest) return;
       try {
         await online.client.acceptFriendRequest(username);
       } on OnlineException catch (e) {
@@ -359,15 +369,18 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
         // payload doubles as the relay body, so a friend we never meet on
         // the mesh can still be granted (their map falls back to the node
         // path whenever BOTH end up offline later).
-        try {
-          await online.client.sendRelay(username,
-              Uint8List.fromList([msgTypeFriendAccept, ...payload]));
-        } on OnlineException catch (e) {
-          _log('online token delivery failed: $e');
-        }
+        await _relayOnline(
+            username, msgTypeFriendAccept, payload, 'token delivery');
       }
       unawaited(_uploadLocationBlobs());
-    }
+    }();
+    entry.record = record;
+    entry.myTokenToThem = token;
+    entry.pendingRequestMsgId = null;
+    await store.put(entry);
+    _syncBeaconLoop();
+    await meshFuture;
+    await onlineFuture;
     notifyListeners();
   }
 
@@ -377,16 +390,19 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     final (record, effects) = transition(entry.record, FriendEvent.decline);
     assert(effects.contains(FriendEffect.emitFriendDecline));
     final msgId = entry.pendingRequestMsgId ?? Uint8List(16);
-    await _sendToPeers(msgTypeFriendDecline,
+    final meshFuture = _sendToPeers(msgTypeFriendDecline,
         encodeFriendDecline(msgId, pubkeyId(entry.record.peerEd25519Pub)));
-    final online = _online;
-    if (online != null && online.canRequest) {
+    final onlineFuture = () async {
+      final online = _online;
+      if (online == null || !online.canRequest) return;
       try {
         await online.client.declineFriendRequest(username);
       } on OnlineException catch (e) {
         if (!e.notFound) _log('online decline failed: $e');
       }
-    }
+    }();
+    await meshFuture;
+    await onlineFuture;
     entry.record = record;
     entry.pendingRequestMsgId = null;
     await store.put(entry);
@@ -439,16 +455,11 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
     notifyListeners();
     await _mirror(record);
     if (revokePayload != null) {
-      await _sendToPeers(msgTypeLocationRevoke, revokePayload);
-      final online = _online;
-      if (online != null && online.canRequest) {
-        try {
-          await online.client.sendRelay(username,
-              Uint8List.fromList([msgTypeLocationRevoke, ...revokePayload]));
-        } on OnlineException catch (e) {
-          _log('online location revoke failed: $e');
-        }
-      }
+      final meshFuture = _sendToPeers(msgTypeLocationRevoke, revokePayload);
+      final onlineFuture = _relayOnline(
+          username, msgTypeLocationRevoke, revokePayload, 'location revoke');
+      await meshFuture;
+      await onlineFuture;
     }
     // Re-upload without this friend — replacing the whole blob set IS the
     // online revoke.
@@ -480,18 +491,22 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
         text: text, outgoing: true, at: _now(), status: DmStatus.sending);
     entry.addMessage(message);
     notifyListeners();
-    final online = _online;
-    var viaOnline = false;
-    if (online != null && online.canRequest) {
-      try {
-        await online.client.sendRelay(username,
-            Uint8List.fromList([msgTypeDirectMessage, ...payload]));
-        viaOnline = true;
-      } on OnlineException catch (e) {
-        _log('online DM failed ($e) — mesh only');
-      }
+    // Both paths race: the mesh spray starts first and neither waits on the
+    // other, so an unreachable backend costs its timeout in parallel rather
+    // than delaying delivery to a peer already in radio range.
+    final meshFuture = _sendToPeers(msgTypeDirectMessage, payload);
+    final onlineFuture =
+        _relayOnline(username, msgTypeDirectMessage, payload, 'DM');
+    final viaMesh = (await meshFuture) > 0;
+    // Mesh is usually the faster of the two — show the message as relayed as
+    // soon as it lands, rather than holding "sending" until the backend
+    // answers. The final `via`/`status` below reconciles both results.
+    if (viaMesh) {
+      message.via = DmVia.mesh;
+      message.status = DmStatus.relayed;
+      notifyListeners();
     }
-    final viaMesh = await _sendToPeers(msgTypeDirectMessage, payload) > 0;
+    final viaOnline = await onlineFuture;
     message.via = viaOnline && viaMesh
         ? DmVia.both
         : viaOnline
@@ -1115,18 +1130,13 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
       pubkeyId(entry.record.peerEd25519Pub),
       entry.record.peerCurve25519Pub,
     );
-    await _sendToPeers(msgTypeFriendAccept, payload);
     // Same sealed payload through the online relay, so a grant/refresh
-    // reaches a friend we never meet on the mesh.
-    final online = _online;
-    if (online != null && online.canRequest) {
-      try {
-        await online.client.sendRelay(entry.record.peerUsername,
-            Uint8List.fromList([msgTypeFriendAccept, ...payload]));
-      } on OnlineException catch (e) {
-        _log('online token delivery failed: $e');
-      }
-    }
+    // reaches a friend we never meet on the mesh — in parallel with the spray.
+    final meshFuture = _sendToPeers(msgTypeFriendAccept, payload);
+    final onlineFuture = _relayOnline(entry.record.peerUsername,
+        msgTypeFriendAccept, payload, 'token delivery');
+    await meshFuture;
+    await onlineFuture;
   }
 
   /// Hourly: re-mint any of my tokens inside the refresh margin and
@@ -1253,6 +1263,27 @@ class FriendService extends ChangeNotifier implements OnlineHandler {
       await online.client.putLocationBlobs(blobs);
     } on OnlineException catch (e) {
       _log('location blob upload failed: $e');
+    }
+  }
+
+  /// Hand the same sealed [payload] to the backend relay. Started alongside
+  /// [_sendToPeers] rather than before or after it, so an unreachable
+  /// backend costs its timeout in parallel with the mesh spray instead of
+  /// delaying it. Never throws — returns false and logs, letting the caller
+  /// fall back to whatever the mesh leg reported. Duplicate arrivals are the
+  /// expected case and are dropped receiver-side by the ciphertext-hash
+  /// dedup ([FriendEntry.markDmSeen]).
+  Future<bool> _relayOnline(
+      String username, int msgType, Uint8List payload, String what) async {
+    final online = _online;
+    if (online == null || !online.canRequest) return false;
+    try {
+      await online.client
+          .sendRelay(username, Uint8List.fromList([msgType, ...payload]));
+      return true;
+    } on OnlineException catch (e) {
+      _log('online $what failed ($e) — mesh only');
+      return false;
     }
   }
 

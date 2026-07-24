@@ -171,7 +171,11 @@ class MeshBackendClient extends http.BaseClient {
           .send(_rebuild(request, bodyBytes))
           .timeout(directTimeout);
     } on Exception catch (e) {
-      if (!channel.available) rethrow;
+      if (!channel.available) {
+        dbg.DebugLog.instance.log('proxy',
+            'direct ${request.url.path} failed ($e) — NO node peer, rethrowing');
+        rethrow;
+      }
       dbg.DebugLog.instance
           .log('proxy', 'direct ${request.url.path} failed ($e) — via node');
       // The node forwards exactly the headers Supabase needs: the bearer

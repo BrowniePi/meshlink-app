@@ -1,7 +1,9 @@
 # meshlink-app
 
-Flutter shell for MeshLink Phase 1 — the same relay protocol logic proven in
-`meshlink-core` (Phase 0), now running over real BLE between two real phones.
+Flutter client for MeshLink — the same relay protocol logic proven in
+`meshlink-core`, running over real BLE between phones and nodes, with an
+online mode (Supabase-backed friends, sealed direct messages, and location
+sharing) that falls back to the mesh whenever connectivity drops.
 
 ## Layout
 
@@ -151,7 +153,7 @@ Step 3  timestamp check   > 5 min old or > 30 s in future  — two comparisons, 
 Step 4  dedup             msg_id already seen               — Bloom filter lookup
 Step 5  rate limit        sender exceeds N/10 s             — sliding window counter  [stub]
 Step 6  signature verify  Ed25519 invalid                   — libsodium, ~50 µs/Pi    [stub]
-Step 7  attestation       no valid ticket token             — JWT verify               [stub]
+Step 7  attestation       no valid ticket token             — cached-token lookup
 Step 8  deliver or relay  —
 ```
 

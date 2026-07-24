@@ -61,6 +61,12 @@ class BleTransport implements Transport, DutyCycleControl {
   Duration scanInterval;
   Duration scanTimeout = const Duration(seconds: 10);
 
+  /// Upper bound on a single central-role connection attempt (connect +
+  /// service discovery). Without this, a GATT call that hangs would leave the
+  /// peer stuck in [_connecting] forever, so the scan loop would never retry
+  /// it — discovery of that node silently dies for the rest of the session.
+  static const Duration _connectTimeout = Duration(seconds: 15);
+
   /// Whether the peripheral role (GATT server + advertising) should be up.
   /// Leaf tier turns it off — zero relay load — while the central role keeps
   /// the node link alive for the phone's own messages.
@@ -297,9 +303,14 @@ class BleTransport implements Transport, DutyCycleControl {
       });
       // License.nonprofit: MeshLink is a non-commercial student project,
       // per flutter_blue_plus's dual-license terms.
-      await device.connect(mtu: 247, license: License.nonprofit);
+      await device.connect(
+        mtu: 247,
+        license: License.nonprofit,
+        timeout: _connectTimeout,
+      );
 
-      final services = await device.discoverServices();
+      final services =
+          await device.discoverServices().timeout(_connectTimeout);
       BluetoothCharacteristic? rx;
       BluetoothCharacteristic? tx;
       for (final service in services) {

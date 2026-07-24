@@ -4,7 +4,8 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
     // FCM push. Applied conditionally below so the app keeps building until
     // google-services.json is in place (see docs/notifications.md).
-    id("com.google.gms.google-services") version "4.4.2" apply false
+    // Version is pinned in settings.gradle.kts; don't redeclare it here.
+    id("com.google.gms.google-services") apply false
 }
 
 if (file("google-services.json").exists()) {

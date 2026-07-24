@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -321,6 +322,45 @@ void main() {
     expect(fix, isNull); // uniformly unavailable
   });
 
+  test('both copies of a DM racing in the SAME tick still land once',
+      () async {
+    await befriendOnline();
+    bob.transport.drain();
+    final notified = <String>[];
+    alice.friends.onDmReceived = (from, text, key) => notified.add(key);
+
+    await bob.friends.sendDirectMessage('alice', 'simultaneous');
+    // Neither delivery is awaited before the other starts, so both run
+    // their decode/hash awaits interleaved — the arrival order the
+    // parallelized send actually produces.
+    await Future.wait([aliceOnline.pollNow(), bob.deliverTo(alice)]);
+
+    final got = alice.friends.store.byUsername('bob')!.messages;
+    expect(got, hasLength(1));
+    expect(got.single.text, 'simultaneous');
+    expect(notified, hasLength(1));
+  });
+
+  test('a DM sprays over the mesh without waiting on the backend', () async {
+    await befriendOnline();
+    alice.transport.sent.clear();
+
+    // Backend held open: a sequential send would still be blocked here.
+    final gate = Completer<void>();
+    backend.holdMessages = gate;
+    final send = alice.friends.sendDirectMessage('bob', 'hi');
+    await pumpEventQueue();
+
+    expect(alice.transport.sent, isNotEmpty); // sprayed already
+    final dm = alice.friends.store.byUsername('bob')!.messages.last;
+    expect(dm.status, DmStatus.relayed); // and shown as sent, not pending
+    expect(dm.via, DmVia.mesh);
+
+    gate.complete();
+    await send;
+    expect(dm.via, DmVia.both); // reconciled once the backend answered
+  });
+
   test('token delivery rides the online relay so mesh queries work later',
       () async {
     await befriendOnline();
@@ -344,6 +384,10 @@ class FakeOnlineBackend {
   final List<Map<String, String>> messages = [];
   final Map<String, Map<String, String>> locationBlobs = {};
   bool failMessages = false;
+
+  /// When set, send_message blocks until completed — lets a test hold the
+  /// online path open and check the mesh path did not wait on it.
+  Completer<void>? holdMessages;
   List<int>? lastCiphertext;
   int _nextId = 0;
 
@@ -421,6 +465,7 @@ class FakeOnlineBackend {
       }
 
       if (request.method == 'POST' && path == '/rest/v1/rpc/send_message') {
+        if (holdMessages != null) await holdMessages!.future;
         if (failMessages) return http.Response('{}', 500);
         final to = body()['to_username'] as String;
         if (friendships[_pair(me, to)] != 'friends') {

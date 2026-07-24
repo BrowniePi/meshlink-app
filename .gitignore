@@ -53,3 +53,6 @@ __pycache__
 
 # Secrets
 service-account.json
+
+# Supabase CLI local state (project-ref, versions, etc.)
+supabase/.temp/
